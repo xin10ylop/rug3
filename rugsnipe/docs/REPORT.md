@@ -118,29 +118,25 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
 - **Rule:** `bot/configs/fp_rules.json` uses the walk-forward rule frozen at the end of the data (≤ 2 h before the test). That is 601 armed fingerprints covering 39% of launches, minus 102 heavy deployers. In the persistence test, a list frozen on day −3 kept 95% of the walk-forward value on day −2 and 55% on day −1. Rebuild it daily from fresh data (`research/fp_rules.py`).
 - **Dry run of `live_gated.json` (7 min, no sends):** 28 fingerprint triggers, 10 passed the race gate (~1.4 buys/min). The SIGTERM drain stopped cleanly.
 
-## First live trades (2026-10-24, ~15:48 UTC, 0.03 SOL each): the edge disappears when we take the trade
+## Gated probe (fresh data, 16:20 UTC): gate confirmed
 
-10 round trips in 5.7 minutes, all gated and all on armed fingerprints. **10 of 10 lost: −0.065 SOL in total, −15.4% per trade.**
+200 probes: 97% same slot, ahead of all rivals on 42% of 77 contested launches. The bar was ≥ 85% and ≥ 40% of ≥ 30. The 52% seen when slicing the first run regressed to 42%. The Frankfurt-vs-rest-of-Europe split did not replicate (49% vs 36%).
 
-- **Execution worked:**
-  - Every fill landed in the create slot, first after the dev bundle.
-  - The one contested launch was won, ahead of 5 snipers.
-  - Sells fired on time.
-  - The simulator at our exact position reproduces each closed trade to the lamport (the first also paid a one-time ~0.0013 SOL account rent).
-- **The same rule on launches we did not trade:**
+**Evaluation bug (fixed 16:40 UTC):** the per-mint transaction fetch in `probe_eval` and `live_eval` included failed transactions. On hot launches, failed attempts outnumber trades up to 1000:1, so the page cap cut off the real trades. The backfill was not affected: it fetched succeeded transactions only. With complete data, the simulator reproduces all 10 live trades exactly (one paid a one-time ~0.0013 SOL account rent). The 42% above came from the buggy fetch. Re-score it with `./scripts/eval_probe.sh data/journal_probe_gated.jsonl`; missed rivals can only lower it.
 
-| launches (same armed list, chain data) | n | sim as first, per trade | winners | outside buys in first 30 s (p50) |
+## First live trades (2026-10-24, ~15:48 UTC, 0.03 SOL each): 10 of 10 lost
+
+10 round trips in 5.7 minutes, all gated and all on armed fingerprints. **All 10 lost: −0.065 SOL in total, −21.7% per trade.** Every fill landed in the create slot, first after the dev bundle, and all 4 contested launches were won.
+
+| same armed rule, chain data, complete trades | n | sim as first, per trade | winners | outside buys in first 30 s (p50) |
 |---|---|---|---|---|
-| same 5.7 min, not traded | 17 | +8.0% | 53% | 2.71 SOL |
+| last 75 min, not traded, all | 261 | −0.0% | 28% | 1.12 SOL |
+| last 75 min, not traded, gate pass | 97 | +1.3% | 27% | 0.75 SOL |
+| same 5.7 min, not traded, all | 17 | +8.0% | 53% | 2.71 SOL |
 | same 5.7 min, not traded, gate pass | 6 | +5.1% | 50% | 1.79 SOL |
-| last 75 min, not traded, gate pass | 98 | +2.6% | 28% | 0.46–0.75 SOL |
-| last 75 min, not traded, all | 262 | +1.2% | 28% | — |
-| **traded by us** | **10** | **−15.4%** | **0%** | **0.10 SOL** |
+| **traded by us** (= live, exactly) | **10** | **−21.7%** | **0%** | **0.22 SOL** |
 
-- **Ruled out:**
-  - The gate: gated launches did better than ungated.
-  - Launch type: high-priority creators did +6.4% when we were not in.
-  - Our price impact: the replay with our trades removed still gives −15.4%.
-- **What differs:** after our buy, outside buyers mostly stayed away (5 of 10 launches had almost none). Insiders sold sooner (median 8 vs 17 slots after the create, and a larger share of their tokens).
-- **Interpretation:** chance would produce this ~1–3% of the time. The likely explanation is that **taking the first-buyer spot changes what follows it**, and a replay of other traders' recorded behaviour cannot show that. This is the same failure as the Oct 21–23 analysis ("the difference appears after the first buy"). It is not fixable with speed.
-- **Decision:** stop. The way to resolve it definitively is ~40 more trades with the 20% control group, ≤ ~0.2 SOL at risk. Not recommended.
+- **The pattern:** 9 of our 10 trades pass the same gate as the untraded group, and they did far worse. On the launches we bought, insiders sold sooner (median 8 vs 17 slots after the create), and outside buyers mostly stayed away.
+- **Most likely explanation:** taking the first-buyer spot changes what follows. A replay of other traders' recorded behaviour cannot show that, which is the Oct 21–23 failure again.
+- **Not proven:** n=10, and the bot's selection is not random relative to the untraded group.
+- **Decisive test:** `live_gated.json` now skips **50%** of triggers at random. Skipped triggers are simulated; traded ones are measured on chain. `live_eval` prints a PRESENCE TEST and a verdict at ≥ 30 traded and ≥ 20 skipped. **Stop for good if traded < skipped by more than 2 standard errors.** Expected cost if the effect is real: ~0.2 SOL.

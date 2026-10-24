@@ -48,7 +48,8 @@ async def measure(rpc, probes, wallet, geo):
 
     async def one(p):
         seq = []
-        async for t in rpc.txs_for_address(p["mint"], order="asc", limit=80, max_pages=1,
+        # succeeded only (failed attempts can be most of a hot launch's txs and would crowd out the rivals' buys)
+        async for t in rpc.txs_for_address(p["mint"], order="asc", limit=100, max_pages=5, status="succeeded",
                                            slot_gte=p["create_slot"], slot_lt=p["create_slot"] + 8):
             ti = parse_tx(t)
             seq.append(dict(slot=ti.slot, idx=ti.tx_index or 0, create=any(n == "create" for n, _ in ti.events),

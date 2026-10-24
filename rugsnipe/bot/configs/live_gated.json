@@ -50,5 +50,5 @@
   "daily_loss_limit_sol": 0.25,
   "max_buys_per_hour": 240,
   "consecutive_loss_disable": 25,
-  "control_skip_prob": 0.2
+  "control_skip_prob": 0.5
 }

@@ -26,11 +26,14 @@ from sim import load_launch, simulate
 
 TX_COST = 495_000 + 195_000  # configured buy + sell priority fee, tip and base fee (lamports)
 TP, HOLD = 0.3, 142          # exit as configured: +30% net or 30 s (~142 slots)
+RACE_WIN = 0.42              # measured by the gated probe: ahead of all slot-0 rivals on 42% of contested launches
 
 
 async def mint_txs(rpc: Rpc, mint: str, s0: int, slots: int):
     seq = []
-    async for t in rpc.txs_for_address(mint, order="asc", limit=100, slot_gte=s0, slot_lt=s0 + slots, max_pages=8):
+    # succeeded only: on contested launches failed attempts can outnumber trades 1000:1 and would exhaust the page cap
+    async for t in rpc.txs_for_address(mint, order="asc", limit=100, slot_gte=s0, slot_lt=s0 + slots, status="succeeded",
+                                       max_pages=20):
         ti = parse_tx(t)
         trades = [e for n, e in ti.events if n == "trade" and e["mint"] == mint]
         seq.append(dict(slot=ti.slot, idx=ti.tx_index or 0, ok=ti.ok, signer=ti.signer, sig=ti.sig,
@@ -132,12 +135,14 @@ async def main():
         async def ctl(m, es):
             c = next(x for x in es if x["ev"] == "control_skip")["d"]
             seq = await mint_txs(rpc, m, c["create_slot"], 900)
-            L, _ = launch_of(seq, m, c["deployer"])
+            L, cr = launch_of(seq, m, c["deployer"])
             if L:
                 size = float(np.median([r["spend"] for r in res])) if res else 0.03
                 a = simulate(L, buy_sol=size, d_buy=0, where="start", bundle_end_idx=bundle_end(L), tp=TP, max_hold_slots=HOLD)
                 b = simulate(L, buy_sol=size, d_buy=0, where="end", tp=TP, max_hold_slots=HOLD)
-                ctrl.append(((a.pnl_lamports - TX_COST) / 1e9, (b.pnl_lamports - TX_COST) / 1e9))
+                contested = race(seq, cr, c["deployer"], wallet, cr["slot"], -1) != "uncontested"  # any slot-0 rival
+                first, last = (a.pnl_lamports - TX_COST) / 1e9, (b.pnl_lamports - TX_COST) / 1e9
+                ctrl.append((first, last, RACE_WIN * first + (1 - RACE_WIN) * last if contested else first))
 
         await asyncio.gather(*(ctl(m, es) for m, es in controls.items()))
 
@@ -164,6 +169,19 @@ async def main():
         c = np.array(ctrl)
         print(f"CONTROL (skipped, same size): n {len(c)}  sim if first {c[:, 0].mean():+.5f}  sim if last in slot 0 "
               f"{c[:, 1].mean():+.5f} SOL/trade")
+        # presence test: random skips show what the same triggers do WITHOUT us (at the measured race odds);
+        # traded on-chain PnL shows what they do WITH us
+        t = np.array([r["pnl_chain"] for r in res if r["closed"]])
+        if len(t) >= 2 and len(c) >= 2:
+            d = t.mean() - c[:, 2].mean()
+            se = np.sqrt(t.var(ddof=1) / len(t) + c[:, 2].var(ddof=1) / len(c))
+            print(f"PRESENCE TEST: traded (live) {t.mean():+.5f} SOL/trade (n {len(t)}) vs skipped (sim, measured race odds) "
+                  f"{c[:, 2].mean():+.5f} (n {len(c)}): difference {d:+.5f} = {d / se:+.1f} standard errors")
+            if len(t) >= 30 and len(c) >= 20:
+                print("VERDICT: our presence hurts the trade -> STOP" if d < -2 * se else
+                      "VERDICT: no presence effect detected -> continue to 60 fills, then judge PnL at 0.1 SOL")
+            else:
+                print(f"(verdict at >= 30 traded and >= 20 skipped; now {len(t)} / {len(c)})")
     json.dump(res, open(jpath + ".eval.json", "w"), indent=1)
 
 
