@@ -177,11 +177,11 @@ async def main():
             se = np.sqrt(t.var(ddof=1) / len(t) + c[:, 2].var(ddof=1) / len(c))
             print(f"PRESENCE TEST: traded (live) {t.mean():+.5f} SOL/trade (n {len(t)}) vs skipped (sim, measured race odds) "
                   f"{c[:, 2].mean():+.5f} (n {len(c)}): difference {d:+.5f} = {d / se:+.1f} standard errors")
-            if len(t) >= 30 and len(c) >= 20:
+            if len(t) >= 15 and len(c) >= 15:
                 print("VERDICT: our presence hurts the trade -> STOP" if d < -2 * se else
                       "VERDICT: no presence effect detected -> continue to 60 fills, then judge PnL at 0.1 SOL")
             else:
-                print(f"(verdict at >= 30 traded and >= 20 skipped; now {len(t)} / {len(c)})")
+                print(f"(verdict at >= 15 traded and >= 15 skipped; now {len(t)} / {len(c)})")
     json.dump(res, open(jpath + ".eval.json", "w"), indent=1)
 
 

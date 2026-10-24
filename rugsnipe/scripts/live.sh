@@ -2,6 +2,7 @@
 # Gated live micro test: real buys on armed bot fingerprints, only when the slot leader is < 1200 km away and the
 # create reached us early in its slot. 0.03 SOL/trade, max 3 open, stops for the day at -0.25 SOL.
 #   ./scripts/live.sh            # start in the background (PID in data/live.pid)
+#   ./scripts/live.sh small      # same at 0.01 SOL/trade, daily stop -0.05 SOL
 #   ./scripts/stop_live.sh       # stop buying, let open positions exit (<= ~60 s), then quit
 #   ./scripts/eval_live.sh       # on-chain PnL, race outcomes, sim-vs-live
 set -euo pipefail
@@ -9,11 +10,12 @@ cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "missing .env (run ./scripts/install.sh)"; exit 1; }
 set -a; . ./.env; set +a
 CFG=bot/configs/live_gated.json
+[ "${1:-}" = small ] && CFG=bot/configs/live_small.json   # 0.01 SOL/trade, stops at -0.05 SOL: fits a ~0.08 SOL wallet
 if [ -f data/live.pid ] && kill -0 "$(cat data/live.pid)" 2>/dev/null; then echo "already running (PID $(cat data/live.pid))"; exit 1; fi
 if [ -z "$(find data/live/leaders.json -mmin -360 2>/dev/null)" ]; then
   echo "== locating leaders (data/live/leaders.json)"; .venv/bin/python research/leaders.py
 fi
-echo "== live gated test: wallet $(bot/target/release/rugbot pubkey wallet.json), journal data/journal_live.jsonl"
+echo "== live gated test ($CFG): wallet $(bot/target/release/rugbot pubkey wallet.json), journal data/journal_live.jsonl"
 RUST_BACKTRACE=0 nohup bot/target/release/rugbot "$CFG" > data/logs/live_stdout.log 2> data/logs/live_stderr.log &
 echo $! > data/live.pid
 sleep 8
