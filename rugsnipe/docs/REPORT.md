@@ -136,7 +136,8 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
 | same 5.7 min, not traded, gate pass | 6 | +5.1% | 50% | 1.79 SOL |
 | **traded by us** (= live, exactly) | **10** | **−21.7%** | **0%** | **0.22 SOL** |
 
-- **The pattern:** 9 of our 10 trades pass the same gate as the untraded group, and they did far worse. On the launches we bought, insiders sold sooner (median 8 vs 17 slots after the create), and outside buyers mostly stayed away.
+- **The pattern:** 9 of our 10 trades pass the same gate as the untraded group, and they did far worse. Six were bundle dumps: 3–5 wallets bought 4–9 SOL with the create and sold everything, usually 0.6–4 s later. Four were dead launches (no outside buyer in 30 s; −5% in fees).
+- **What differs, with complete data:** insider dumps within 30 s were about as common on our launches (60%, median 2.1 s) as on untraded ones (51–55%, ~3 s). The clearer difference is outside buying in the first 30 s: a median of 0.22 SOL vs 0.75–1.12 SOL. Zero winners in 10 from a 28%-winner pool has ~4% probability, and losses this large ~1%.
 - **Most likely explanation:** taking the first-buyer spot changes what follows. A replay of other traders' recorded behaviour cannot show that, which is the Oct 21–23 failure again.
 - **Not proven:** n=10, and the bot's selection is not random relative to the untraded group.
 - **Decisive test:** `live_gated.json` now skips **50%** of triggers at random. Skipped triggers are simulated; traded ones are measured on chain. `live_eval` prints a PRESENCE TEST and a verdict at ≥ 30 traded and ≥ 20 skipped. **Stop for good if traded < skipped by more than 2 standard errors.** Expected cost if the effect is real: ~0.2 SOL.
