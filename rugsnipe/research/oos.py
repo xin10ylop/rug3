@@ -2,7 +2,7 @@
 import collections, sys
 import numpy as np, pandas as pd
 from analyze import BUY_TX_COST, SELL_TX_COST, FAIL_RATE, FAIL_COST
-BF = "/home/user/rug3/data/bf/"
+from paths import BF
 ADJ = (BUY_TX_COST + SELL_TX_COST + FAIL_RATE * FAIL_COST - 600_000) / 1e9   # sim costs -> live low-fee costs
 N_MIN, MEAN_MIN, LAST_N, DELAY = 5, 0.005, 30, 2000
 

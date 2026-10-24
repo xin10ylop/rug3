@@ -8,6 +8,8 @@ import sys
 import numpy as np
 import pandas as pd
 
+from paths import BF
+
 KEYS = ["k_fund_amt", "k_mother", "k_deployer", "k_fp"]
 DELAY = {"tp30_t30": 200, "tp50_t60": 350, "tp100_t180": 900, "tp100_t600": 2900}
 
@@ -46,7 +48,7 @@ def summarize(trades, label):
 
 
 def main():
-    df = pd.read_parquet("/home/user/rug3/data/bf/sim_24h.parquet").sort_values("s0").reset_index(drop=True)
+    df = pd.read_parquet(BF + "sim_24h.parquet").sort_values("s0").reset_index(drop=True)
     rows = []
     for scen, ex, key, n_min, m_min in itertools.product(["b0start", "b0end", "b1", "b2"],
                                                           ["tp30_t30", "tp50_t60", "tp100_t180"],
@@ -57,7 +59,7 @@ def main():
         r.update(scen=scen, ex=ex, key=key, n_min=n_min, m_min=m_min)
         rows.append(r)
     out = pd.DataFrame(rows)
-    out.to_csv("/home/user/rug3/data/bf/walkforward.csv", index=False)
+    out.to_csv(BF + "walkforward.csv", index=False)
     pd.set_option("display.width", 220)
     pd.set_option("display.max_rows", 200)
     cols = ["scen", "ex", "key", "n_min", "m_min", "n", "mean", "total", "win", "t", "med"]

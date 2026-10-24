@@ -1,16 +1,16 @@
 {
   "mode": "probe",
   "probe_every": 3,
-  "probe_max": 60,
+  "probe_max": 200,
   "rpc_url": "${TRITON_RPC_URL}",
   "grpc_url": "https://riptide.rpcpool.com:443",
   "grpc_token": "${TRITON_X_TOKEN}",
-  "keypair_path": "${RUGBOT_KEYPAIR}",
+  "keypair_path": "wallet.json",
   "senders": [
     {
-      "name": "helius_fra_max",
+      "name": "helius_fra_swqos",
       "kind": "jsonrpc",
-      "url": "http://fra-sender.helius-rpc.com/fast"
+      "url": "http://fra-sender.helius-rpc.com/fast?swqos_only=true"
     },
     {
       "name": "triton_sendtx",
@@ -18,7 +18,7 @@
       "url": "${TRITON_RPC_URL}/sendtx"
     }
   ],
-  "journal_path": "/root/rug3/data/journal_probe_max.jsonl",
+  "journal_path": "data/journal_probe.jsonl",
   "buy_sol": 0.01,
   "buy_slippage": 0.3,
   "buy_cu_limit": 120000,
@@ -26,7 +26,7 @@
   "tips": [
     [
       "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
-      1000000
+      10000
     ]
   ],
   "sell_tips": [

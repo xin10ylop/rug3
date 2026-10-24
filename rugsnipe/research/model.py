@@ -15,7 +15,7 @@ import pandas as pd
 
 from features import deployer_table, funder_kinds, load_creates, load_funding
 
-BF = "/home/user/rug3/data/bf/"
+from paths import BF
 TARGETS = ["b1|tp100_t180", "b1|tp50_t60", "b2|tp100_t180", "b0end|tp100_t180", "b1|tp100_t600", "b1|tp30_t30"]
 DELAY = 900  # slots until a launch's outcome is known (t180 exit)
 

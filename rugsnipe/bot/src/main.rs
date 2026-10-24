@@ -361,6 +361,18 @@ impl Bot {
     }
 
     async fn on_timer(self: &Arc<Self>) {
+        if self.cfg.mode == "probe" {
+            let done = { let s = self.s.lock(); s.probes_sent >= self.cfg.probe_max };
+            if done {
+                static DONE_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                let t = DONE_AT.get_or_init(Instant::now);
+                if t.elapsed() > Duration::from_secs(20) {
+                    self.j.log(json!({"ev": "probe_done", "probes": self.cfg.probe_max}));
+                    std::process::exit(0);
+                }
+            }
+            return;
+        }
         let mut to_sell = vec![];
         {
             let mut s = self.s.lock();
@@ -420,8 +432,36 @@ fn simtx(args: &[String]) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(|s| s.as_str()) == Some("simtx") {
-        return simtx(&argv);
+    match argv.get(1).map(|s| s.as_str()) {
+        Some("simtx") => return simtx(&argv),
+        Some("keygen") => {
+            // fresh dedicated wallet; never overwrites an existing file
+            let path = argv.get(2).ok_or_else(|| anyhow::anyhow!("usage: rugbot keygen <path>"))?;
+            anyhow::ensure!(!std::path::Path::new(path).exists(), "{path} already exists; refusing to overwrite");
+            let kp = Keypair::new();
+            let bytes: Vec<u8> = kp.to_bytes().to_vec();
+            {
+                use std::io::Write;
+                #[cfg(unix)]
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut o = std::fs::OpenOptions::new();
+                o.write(true).create_new(true);
+                #[cfg(unix)]
+                o.mode(0o600);
+                let mut f = o.open(path)?;
+                f.write_all(serde_json::to_string(&bytes)?.as_bytes())?;
+            }
+            println!("{}", kp.pubkey());
+            return Ok(());
+        }
+        Some("pubkey") => {
+            let path = argv.get(2).ok_or_else(|| anyhow::anyhow!("usage: rugbot pubkey <keypair.json>"))?;
+            let b: Vec<u8> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+            let kp = Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair: {e}"))?;
+            println!("{}", kp.pubkey());
+            return Ok(());
+        }
+        _ => {}
     }
     let path = std::env::args().nth(1).unwrap_or_else(|| "config.json".into());
     let cfg = Config::load(&path)?;
@@ -462,7 +502,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<Ev>();
     tokio::spawn(stream::run_deshred(cfg.grpc_url.clone(), cfg.grpc_token.clone(), tx.clone()));
-    tokio::spawn(stream::run_processed(cfg.grpc_url.clone(), cfg.grpc_token.clone(), funders_rx, me, tx.clone()));
+    if cfg.mode != "probe" {
+        // probe mode only needs the pre-execution create stream: keep CPU/bandwidth low on a shared box
+        tokio::spawn(stream::run_processed(cfg.grpc_url.clone(), cfg.grpc_token.clone(), funders_rx, me, tx.clone()));
+    }
     {
         let mut s = bot.s.lock();
         for a in &initial_armed {
@@ -516,7 +559,8 @@ async fn main() -> anyhow::Result<()> {
             Ev::Failed { .. } => "failed", Ev::Slot { .. } => "slot" }).or_insert(0) += 1;
         if last_stats.elapsed() > Duration::from_secs(60) {
             let (armed, open, pending, slot) = { let s = bot.s.lock(); (s.armed.len(), s.positions.len(), s.pending.len(), s.slot) };
-            bot.j.log(json!({"ev": "stats", "per_min": cnt, "armed": armed, "open": open, "pending": pending, "slot": slot,
+            let probes = bot.s.lock().probes_sent;
+            bot.j.log(json!({"ev": "stats", "per_min": cnt, "armed": armed, "open": open, "pending": pending, "slot": slot, "probes_sent": probes,
                 "blockhash_ok": bot.bh.get().is_some()}));
             cnt.clear();
             last_stats = Instant::now();

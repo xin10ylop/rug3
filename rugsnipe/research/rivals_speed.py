@@ -1,8 +1,9 @@
 """From recorder data: how fast do slot-0 snipers respond to a create? (deshred receive-time gap + index gap)"""
 import gzip, glob, orjson, collections, numpy as np, zlib
+from paths import REC
 
 def rows(kind):
-    for f in sorted(glob.glob(f'/home/user/rug3/data/rec/{kind}-*.jsonl.gz')):
+    for f in sorted(glob.glob(f'{REC}{kind}-*.jsonl.gz')):
         try:
             with gzip.open(f) as fh:
                 for l in fh:

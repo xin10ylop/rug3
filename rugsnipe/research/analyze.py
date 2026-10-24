@@ -17,7 +17,7 @@ from anatomy import bundle_end, summarize
 from features import deployer_table, funder_kinds, launch_keys, load_creates, load_funding
 from sim import load_launch, simulate
 
-BF = "/home/user/rug3/data/bf/"
+from paths import BF
 SLOT_S = 0.212
 BUY_SOL = 0.25
 # per-round-trip tx costs (lamports): buy base+prio+tip, sell base+prio+tip

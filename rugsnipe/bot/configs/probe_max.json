@@ -1,14 +1,16 @@
 {
-  "mode": "live",
+  "mode": "probe",
+  "probe_every": 3,
+  "probe_max": 60,
   "rpc_url": "${TRITON_RPC_URL}",
   "grpc_url": "https://riptide.rpcpool.com:443",
   "grpc_token": "${TRITON_X_TOKEN}",
-  "keypair_path": "${RUGBOT_KEYPAIR}",
+  "keypair_path": "wallet.json",
   "senders": [
     {
-      "name": "helius_fra_swqos",
+      "name": "helius_fra_max",
       "kind": "jsonrpc",
-      "url": "http://fra-sender.helius-rpc.com/fast?swqos_only=true"
+      "url": "http://fra-sender.helius-rpc.com/fast"
     },
     {
       "name": "triton_sendtx",
@@ -16,15 +18,15 @@
       "url": "${TRITON_RPC_URL}/sendtx"
     }
   ],
-  "journal_path": "/root/rug3/data/journal_live.jsonl",
-  "buy_sol": 0.02,
+  "journal_path": "data/journal_probe_max.jsonl",
+  "buy_sol": 0.01,
   "buy_slippage": 0.3,
   "buy_cu_limit": 120000,
   "buy_cu_price": 4000000,
   "tips": [
     [
       "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
-      10000
+      1000000
     ]
   ],
   "sell_tips": [
@@ -41,11 +43,9 @@
   "max_hold_s": 30.0,
   "trailing": null,
   "exit_on_deployer_sell": false,
-  "max_open": 2,
-  "daily_loss_limit_sol": 0.15,
-  "max_buys_per_hour": 20,
-  "consecutive_loss_disable": 8,
-  "control_skip_prob": 0.25,
-  "rules_path": "/root/rug3/data/live/rules.json",
-  "rules_reload_s": 60
+  "max_open": 1,
+  "daily_loss_limit_sol": 0.05,
+  "max_buys_per_hour": 0,
+  "consecutive_loss_disable": 5,
+  "control_skip_prob": 0.0
 }

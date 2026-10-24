@@ -27,8 +27,8 @@ from rpc import Rpc
 from sim import load_launch, simulate
 
 SOLQ = "11111111111111111111111111111111"
-LIVE = "/home/user/rug3/data/live/"
-RULES = os.environ.get("RULES_PATH", "/home/user/rug3/data/live/rules.json")
+from paths import LIVE
+RULES = os.environ.get("RULES_PATH", LIVE + "rules.json")
 INTERVAL = 600
 WINDOW_SLOTS = int(24 * 3600 / 0.212)
 READY_SLOTS = 650  # need ~2.3 min of trades after create to score a 30s-hold trade

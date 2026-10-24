@@ -1,0 +1,4 @@
+aiohttp
+orjson
+base58
+numpy
