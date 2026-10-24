@@ -116,6 +116,7 @@ struct FpRules {
 fn load_fp_rules(path: &str) -> anyhow::Result<FpRules> { Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?) }
 
 struct Bot {
+    balance: std::sync::atomic::AtomicU64, // wallet lamports, polled every 5 s (u64::MAX = unknown)
     cfg: Config,
     kp: Keypair,
     me: Pubkey,
@@ -287,6 +288,8 @@ impl Bot {
             s.buys_hour.retain(|t| t.elapsed() < Duration::from_secs(3600));
             let why = if s.disabled { Some("disabled") }
                 else if s.positions.len() + s.pending.len() >= self.cfg.max_open { Some("max_open") }
+                // a buy needs its spend plus ATA rent (~0.0021), first-buy account rent (~0.0014) and fees
+                else if (self.balance.load(std::sync::atomic::Ordering::Relaxed) as f64) < (buy_sol + 0.01) * 1e9 { Some("low_balance") }
                 else if s.buys_hour.len() as u32 >= self.cfg.max_buys_per_hour { Some("rate") }
                 else if (s.day_pnl as f64) / 1e9 <= -self.cfg.daily_loss_limit_sol { Some("daily_loss") }
                 else if s.pending.contains_key(&info.mint) || s.positions.contains_key(&info.mint) { Some("dup") }
@@ -575,7 +578,7 @@ async fn main() -> anyhow::Result<()> {
     let j = Journal::new(&cfg.journal_path);
     j.log(json!({"ev": "start", "me": me.to_string(), "mode": cfg.mode, "rules": cfg.rules.len(), "funders": funders.len(),
         "fp_armed": fp_rules.armed.len(), "heavy_deployers": fp_rules.heavy_deployers.len()}));
-    let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules), leaders,
+    let bot = Arc::new(Bot { balance: std::sync::atomic::AtomicU64::new(u64::MAX), cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules), leaders,
         s: Mutex::new(State { armed: HashMap::new(), pending: HashMap::new(), positions: HashMap::new(), curves: HashMap::new(),
             slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0,
             dep_seen: HashMap::new() }), fp_rules: parking_lot::RwLock::new(fp_rules) });
@@ -588,6 +591,20 @@ async fn main() -> anyhow::Result<()> {
         let v: serde_json::Value = reqwest::Client::new().post(&cfg.rpc_url).json(&body).send().await?.json().await?;
         let bal = v["result"]["value"].as_u64().unwrap_or(0);
         bot.j.log(json!({"ev": "balance", "lamports": bal}));
+        bot.balance.store(bal, std::sync::atomic::Ordering::Relaxed);
+        let b = bot.clone();
+        tokio::spawn(async move {
+            let http = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"getBalance","params":[b.me.to_string(), {"commitment":"processed"}]});
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if let Ok(r) = http.post(&b.cfg.rpc_url).json(&body).send().await {
+                    if let Some(l) = r.json::<serde_json::Value>().await.ok().and_then(|v| v["result"]["value"].as_u64()) {
+                        b.balance.store(l, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        });
         anyhow::ensure!(bal as f64 / 1e9 >= cfg.buy_sol + 0.02, "wallet balance {} SOL too low for buy_sol {}", bal as f64 / 1e9, cfg.buy_sol);
     }
     if bot.cfg.gate_max_leader_km.is_some() || bot.cfg.mode == "watch" {
