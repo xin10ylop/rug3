@@ -24,7 +24,7 @@ from anatomy import bundle_end
 from probe_eval import wallet_pubkey
 from pumpdecode import parse_tx
 from rpc import Rpc
-from sim import load_launch, simulate
+from sim import Launch, load_launch, simulate
 
 TX_COST = 495_000 + 195_000  # configured buy + sell priority fee, tip and base fee (lamports)
 BUY_FEE, SELL_FEE, FAILED_BUY = 495_000, 195_000, 485_000
@@ -56,12 +56,16 @@ def seq_from_obs(obs, cre):
             for k, tr in sorted(g.items())]
 
 
-async def launch_seq(rpc, m, es, create_slot, src):
+async def launch_seq(rpc, m, es, create_slot, src, journal_mode):
+    """Trades of a launch: from the bot's own log when it has one; None = the create never executed."""
     obs = [e for e in es if e["ev"] == "obs"]
     cre = next(((e["slot"], e["idx"]) for e in es if e["ev"] == "obs_create"), None)
     if cre:
         src["journal"] += 1
         return seq_from_obs(obs, cre)
+    if journal_mode and not obs:
+        src["create_failed"] += 1  # no CreateEvent in our stream: a buy here would have failed
+        return None
     src["rpc"] += 1
     return await mint_txs(rpc, m, create_slot, 900)
 
@@ -73,6 +77,8 @@ def launch_of(seq, mint, deployer, exclude_user=None):
     cr = next((x for x in seq if x["create"] and x["ok"]), None)
     if not cr:
         return None, None
+    if not rows:  # nobody else traded: still a launch (a buy there just pays the round-trip fees)
+        return Launch(mint, deployer, cr["slot"], cr["idx"], [], []), cr
     return load_launch({"mint": mint, "user": deployer, "create_slot": cr["slot"], "create_idx": cr["idx"], "rows": rows}), cr
 
 
@@ -105,6 +111,7 @@ async def main():
         if m:
             by_mint[m].append(e)
     traded = {m: es for m, es in by_mint.items() if any(x["ev"] == "buy_sent" for x in es)}
+    journal_mode = any(e.get("ev") in ("obs", "obs_create") for e in ev)
     controls = {m: es for m, es in by_mint.items() if any(x["ev"] == "control_skip" for x in es)}
     skips = collections.Counter(e["why"] for e in ev if e.get("ev") == "skip")
     print(f"journal: {len(ev)} events; buys sent for {len(traded)} mints; control skips {len(controls)}; skips {dict(skips)}")
@@ -164,7 +171,9 @@ async def main():
             res.append(r)
             if not fill:
                 return
-            seq = await launch_seq(rpc, m, es, d["create_slot"], src)
+            seq = await launch_seq(rpc, m, es, d["create_slot"], src, journal_mode)
+            if seq is None:
+                return
             L, cr = launch_of(seq, m, d["deployer"], exclude_user=wallet)
             if not L:
                 return
@@ -180,7 +189,11 @@ async def main():
 
         async def ctl(m, es):
             c = next(x for x in es if x["ev"] == "control_skip")["d"]
-            seq = await launch_seq(rpc, m, es, c["create_slot"], src)
+            seq = await launch_seq(rpc, m, es, c["create_slot"], src, journal_mode)
+            if seq is None:  # create never executed: counts like a failed buy, as on the bought side
+                f = -FAILED_BUY / 1e9
+                ctrl.append((f, f, f))
+                return
             L, cr = launch_of(seq, m, c["deployer"])
             if L:
                 size = float(np.median([r["spend"] for r in res])) if res else 0.03
@@ -206,7 +219,7 @@ async def main():
     if con:
         print(f"live race: ahead of all rivals on {sum(r['race'] == 'won' for r in con)}/{len(con)} contested fills "
               f"({np.mean([r['race'] == 'won' for r in con]):.0%}); same slot on "
-              f"{np.mean([r.get('slot_off') == 0 for r in filled]):.0%} of fills")
+              f"{np.mean([r['slot_off'] == 0 for r in filled if 'slot_off' in r]):.0%} of fills")
     cmp = [(r["pnl_chain"], r["pnl_sim_at_our_position"]) for r in filled if "pnl_sim_at_our_position" in r and r["closed"]]
     if cmp:
         a = np.array(cmp)
@@ -214,7 +227,7 @@ async def main():
               f"{a[:, 1].mean():+.5f}  (gap {a[:, 0].mean() - a[:, 1].mean():+.5f} SOL/trade)")
     if ctrl:
         c = np.array(ctrl)
-        print(f"CONTROL (skipped, same size): n {len(c)}  sim if first {c[:, 0].mean():+.5f}  sim if last in slot 0 "
+        print(f"CONTROL (skipped, same size): n {len(c)} of {len(controls)}  sim if first {c[:, 0].mean():+.5f}  sim if last in slot 0 "
               f"{c[:, 1].mean():+.5f} SOL/trade")
         # presence test: random skips show what the same triggers do WITHOUT us (at the measured race odds);
         # traded on-chain PnL shows what they do WITH us
