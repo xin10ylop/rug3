@@ -141,3 +141,14 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
 - **Most likely explanation:** taking the first-buyer spot changes what follows. A replay of other traders' recorded behaviour cannot show that, which is the Oct 21–23 failure again.
 - **Not proven:** n=10, and the bot's selection is not random relative to the untraded group.
 - **Decisive test:** `live_gated.json` now skips **50%** of triggers at random. Skipped triggers are simulated; traded ones are measured on chain. `live_eval` prints a PRESENCE TEST and a verdict at ≥ 30 traded and ≥ 20 skipped. **Stop for good if traded < skipped by more than 2 standard errors.** Expected cost if the effect is real: ~0.2 SOL.
+
+## Randomized live test at 0.01 SOL (2026-10-24, 17:10–18:00 UTC): no live edge, so stop
+
+Two runs: 21 and 34 bought, plus 40 randomly skipped triggers. The trade log is complete (0 reserve jumps). The simulator at our exact position matches live to within 0.00012 SOL per trade.
+
+- **Bought:** 34 trades, **1 winner**, −0.00091 SOL per trade. That equals the round-trip fees: the price did not move in our favour. The earlier 21-trade run had 3 winners and −2.7% per trade before fees.
+- **Skipped (simulated, no presence):** −0.00048 SOL per trade. Presence test −1.6 standard errors, not significant.
+- **The race, from full chain data over all 55 buys:** first on **2 of 18 contested launches (11%)**, versus 42% for the no-trade probe. 12 of the 16 lost races had exactly one rival buy ahead of us. A no-trade probe does not compete for the bonding curve's write lock, but a real buy does, and the rivals' buys are scheduled first. **The probe overstated our race position.**
+- **All live trades:** 65, 4 winners (6%; the simulator expects ~27%), about −0.12 SOL including fees.
+
+**Conclusion:** the simulator found profit only for the first buyer on contested launches. Live, we are rarely that buyer, and uncontested launches we buy do not move. At 0.1 SOL per trade this would lose ~3% per trade. Winning the race would mean outbidding the snipers' priority or bundle tips, which the Oct 21–23 analysis already found costs more than the edge. Rugger-sniping from this setup has **no realistic net edge in live execution**. Stop.
