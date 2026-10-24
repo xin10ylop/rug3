@@ -13,8 +13,8 @@ case "${1:-swqos}" in
 esac
 [ -f "$J" ] && mv "$J" "${J%.jsonl}.$(date +%Y%m%d-%H%M%S).jsonl"
 echo "== probing with $CFG (wallet $(bot/target/release/rugbot pubkey wallet.json)); journal $J"
-bot/target/release/rugbot "$CFG" > data/logs/probe_stdout.log 2> data/logs/probe_stderr.log || {
-  echo "bot exited with an error:"; tail -5 data/logs/probe_stderr.log; exit 1; }
+RUST_BACKTRACE=0 bot/target/release/rugbot "$CFG" > data/logs/probe_stdout.log 2> data/logs/probe_stderr.log || {
+  echo "bot exited with an error:"; grep -m3 -E "Error|error" data/logs/probe_stderr.log || head -5 data/logs/probe_stderr.log; exit 1; }
 echo "== probes done; evaluating (waits ~20s for finalization)"
 sleep 20
 .venv/bin/python research/probe_eval.py "$J"
