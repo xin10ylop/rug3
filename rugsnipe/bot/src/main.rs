@@ -490,6 +490,56 @@ impl Bot {
 trait CloneWith { fn clone_with(self, s: &mut State) -> (String, f64); }
 impl CloneWith for (String, f64) { fn clone_with(self, _s: &mut State) -> (String, f64) { self } }
 
+/// `rugbot sweep <keypair.json> <destination>`: send the wallet's whole SOL balance (minus the 5000-lamport fee) to
+/// `destination`, after typing "yes". Uses $TRITON_RPC_URL.
+async fn sweep(argv: &[String]) -> anyhow::Result<()> {
+    use base64::Engine;
+    let (Some(path), Some(dest)) = (argv.get(2), argv.get(3)) else { anyhow::bail!("usage: rugbot sweep <keypair.json> <destination>") };
+    let dest = Pubkey::from_str(dest).map_err(|e| anyhow::anyhow!("destination: {e}"))?;
+    let b: Vec<u8> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let kp = Keypair::try_from(b.as_slice()).map_err(|e| anyhow::anyhow!("keypair: {e}"))?;
+    anyhow::ensure!(dest != kp.pubkey(), "destination is the wallet itself");
+    let url = std::env::var("TRITON_RPC_URL").map_err(|_| anyhow::anyhow!("TRITON_RPC_URL not set (run from scripts/sweep.sh)"))?;
+    let http = reqwest::Client::new();
+    let rpc = |method: &str, params: serde_json::Value| {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let req = http.post(&url).json(&body);
+        async move {
+            let v: serde_json::Value = req.send().await?.json().await?;
+            anyhow::ensure!(v.get("error").is_none(), "rpc error: {}", v["error"]);
+            Ok::<serde_json::Value, anyhow::Error>(v["result"].clone())
+        }
+    };
+    let bal = rpc("getBalance", json!([kp.pubkey().to_string(), {"commitment": "confirmed"}])).await?["value"].as_u64().unwrap_or(0);
+    let amount = bal.saturating_sub(5000);
+    anyhow::ensure!(amount > 0, "nothing to send (balance {bal} lamports)");
+    println!("from {}\nto   {}\namount {:.9} SOL (balance {:.9} minus 0.000005 fee)", kp.pubkey(), dest, amount as f64 / 1e9, bal as f64 / 1e9);
+    print!("type yes to send: ");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    anyhow::ensure!(line.trim() == "yes", "cancelled");
+    let bh = rpc("getLatestBlockhash", json!([{"commitment": "confirmed"}])).await?;
+    let bh: [u8; 32] = bs58::decode(bh["value"]["blockhash"].as_str().unwrap_or_default()).into_vec()?.try_into()
+        .map_err(|_| anyhow::anyhow!("bad blockhash"))?;
+    let (wire, sig) = tx::build_signed(&kp, &[pump::transfer(&kp.pubkey(), &dest, amount)], &bh);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&wire);
+    let sig_s = rpc("sendTransaction", json!([b64, {"encoding": "base64", "preflightCommitment": "confirmed"}])).await?;
+    println!("sent {}", sig_s.as_str().unwrap_or(&bs58::encode(sig).into_string()));
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let st = rpc("getSignatureStatuses", json!([[bs58::encode(sig).into_string()]])).await?;
+        let s0 = &st["value"][0];
+        if !s0.is_null() && s0["confirmationStatus"].as_str().is_some_and(|c| c != "processed") {
+            anyhow::ensure!(s0["err"].is_null(), "transaction failed: {}", s0["err"]);
+            println!("confirmed. wallet balance is now 0");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("not confirmed after 60 s: check the signature above in an explorer before retrying")
+}
+
 /// `rugbot simtx <payer> <mint> <token_program> <buy|sell> <amount> <blockhash_b58>`: print an unsigned
 /// base64 tx for simulateTransaction(sigVerify=false) to validate accounts/CU against live curves.
 fn simtx(args: &[String]) -> anyhow::Result<()> {
@@ -538,6 +588,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", kp.pubkey());
             return Ok(());
         }
+        Some("sweep") => return sweep(&argv).await,
         Some("pubkey") => {
             let path = argv.get(2).ok_or_else(|| anyhow::anyhow!("usage: rugbot pubkey <keypair.json>"))?;
             let b: Vec<u8> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
