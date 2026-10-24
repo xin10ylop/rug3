@@ -42,6 +42,9 @@ pub struct Config {
     pub rules_reload_s: u64,
     #[serde(default)]
     pub deployers: Vec<String>,
+    /// armed bot fingerprints + heavy deployers written by research/fp_rules.py (hot-reloaded)
+    #[serde(default)]
+    pub fp_rules_path: Option<String>,
     #[serde(default)]
     pub chain_follow: bool,
 

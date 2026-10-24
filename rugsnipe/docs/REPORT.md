@@ -64,19 +64,19 @@ The one hypothesis still worth testing is whether your Frankfurt box can win the
 
 **Probe bug (fixed):** 29 probes were byte-identical to an earlier probe built on the same blockhash. The network kept only the first copy, so the first evaluation counted those 29 against the wrong create. They produced the 17 "landed before the create" rows. Each probe is now unique (`cu_price + n`), and the evaluator drops duplicates.
 
-| 171 distinct probes | same slot as create | ahead of all slot-0 rivals (contested launches) |
+Journal-based re-score on the box (`probe_eval.py`, duplicates dropped). 171 distinct probes, all landed. For 25, the create never executed (a real buy there just fails), which leaves 146:
+
+| 146 probes next to an executed create | same slot as create | ahead of all slot-0 rivals (contested launches) |
 |---|---|---|
-| all | 56–65% | 33–38% (15 of 40–46) |
-| leader < 100 km (Frankfurt) | 88% | 19% (3/16) |
-| leader 100–1200 km (AMS, LON, …) | 72% | 55% (11/20) |
-| leader ≥ 1200 km (US, Asia) | 22% | 25% (1/4) |
-| create in first third of its block | 91% | 57% (8/14) |
+| all | 64% | 36% (14/39) |
+| leader < 100 km (Frankfurt) | 90% | 19% (3/16) |
+| leader 100–1200 km (AMS, LON, …) | 71% | 53% (10/19) |
+| leader ≥ 1200 km (US, Asia) | 21% | 25% (1/4) |
+| create in first third of its block | 89% | 54% (7/13) |
 | create in last third | 36% | 0% (0/4) |
-| **leader < 1200 km and create in first half** | **96%** | **55% (12/22)** |
+| **leader < 1200 km and create in first half** | **96%** | **52% (11/21)** |
 
-Ranges cover two ways of treating 25 probes whose create never succeeded on chain.
-
-- **Ungated:** below the bar (≥ 60% same slot **and** ≥ 40% contested wins). No-go, as decided in advance.
+- **Ungated:** 36% contested wins is below the bar (≥ 60% same slot **and** ≥ 40% contested wins). No-go, as decided in advance.
 - **Gated:** the gated row was found by slicing the same 146 probes, so it is a **hypothesis**. It needs a fresh gated run (`./scripts/probe.sh gated`), judged against a bar fixed now: **≥ 85% same slot and ≥ 40% ahead of all rivals on ≥ 30 contested launches.**
 - **Likely cause:** the rivals sit in Frankfurt. When the leader is also in Frankfurt they beat us (19%). When the leader is in Amsterdam or London everyone is ~7–10 ms away, and we win more often than not. Under the gate, this is about 74% of stake (35% Frankfurt metro, 39% rest of Europe).
 
@@ -94,3 +94,13 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
 **Real-time gate calibration (124 creates, watch mode):** "ms since the slot's first pump tx reached us" tracks the create's final position in its block (corr 0.89; block midpoint ≈ 60–75 ms). Of creates seen ≤ 60 ms into their slot, 93% are in the first half of the block, and this captures 87% of first-half creates. The gated config therefore uses `gate_max_into_slot_ms = 60` with `gate_max_leader_km = 1200`.
 
 **Intraday drawdown (gated, 200 resampled days):** at 0.10 SOL/trade, median 0.7–0.85 SOL and p95 1.2–1.6 SOL. At 0.25 SOL/trade, median 1.5–1.9 SOL and p95 2.7–3.0 SOL. A 1 SOL bankroll therefore covers the live verification test (0.02–0.05 SOL/trade), not production.
+
+## Live trigger (bot), validated before any real trade
+
+- **Fingerprint before execution:** the bot computes the deployer's fingerprint from the create transaction in the deshred stream. It covers the dev-buy SOL for six buy variants, a router (`rapidV5D…`), curve completion, v1 inline priority fees and default CU limits.
+- **Match rate:** on 137 fresh creates it matched the simulator's post-execution fingerprint (research/features.py) **136 times (99.3%)**. The one miss, an 85 SOL curve-completing dev buy, is fixed. The rules were learned on 520 other creates (99.8% in a Python port).
+- **Blind spots:**
+  - About 3% of SOL-paired launches are created inside another program (`6Vo3245e…`). The bot never sees those creates and skips them.
+  - 12–19% of creates seen before execution fail on chain. A buy triggered by one fails too, at ~0.0005 SOL.
+- **Rule:** `bot/configs/fp_rules.json` uses the walk-forward rule frozen at the end of the data (≤ 2 h before the test). That is 601 armed fingerprints covering 39% of launches, minus 102 heavy deployers. In the persistence test, a list frozen on day −3 kept 95% of the walk-forward value on day −2 and 55% on day −1. Rebuild it daily from fresh data (`research/fp_rules.py`).
+- **Dry run of `live_gated.json` (7 min, no sends):** 28 fingerprint triggers, 10 passed the race gate (~1.4 buys/min). The SIGTERM drain stopped cleanly.

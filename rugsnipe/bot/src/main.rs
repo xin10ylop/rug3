@@ -7,13 +7,14 @@
 //! Every decision is journaled (JSONL) so live P&L is computed only from trades that actually executed.
 
 mod config;
+mod fp;
 mod leaders;
 mod pump;
 mod send;
 mod stream;
 mod tx;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -100,7 +101,19 @@ struct State {
     disabled: bool,
     creates_seen: u64,
     probes_sent: u64,
+    dep_seen: HashMap<Pubkey, VecDeque<Instant>>, // SOL-paired creates per deployer, trailing 24 h
 }
+
+#[derive(Default, serde::Deserialize)]
+struct FpRules {
+    #[serde(default)]
+    generated_at: f64,
+    armed: HashSet<String>,
+    #[serde(default)]
+    heavy_deployers: HashSet<String>,
+}
+
+fn load_fp_rules(path: &str) -> anyhow::Result<FpRules> { Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?) }
 
 struct Bot {
     cfg: Config,
@@ -116,6 +129,7 @@ struct Bot {
     sell_tips: Vec<(Pubkey, u64)>,
     rules: parking_lot::RwLock<Vec<(Pubkey, config::FunderRule)>>,
     leaders: Arc<leaders::Leaders>,
+    fp_rules: parking_lot::RwLock<FpRules>,
 }
 
 #[derive(serde::Deserialize)]
@@ -210,7 +224,8 @@ impl Bot {
         self.j.log(v);
     }
 
-    async fn on_create(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: pump::CreateInfo, recv: Instant, into_slot_ms: f64) {
+    async fn on_create(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: pump::CreateInfo, recv: Instant, into_slot_ms: f64,
+                       fp: String) {
         if self.cfg.mode == "probe" {
             if info.sol_paired && !info.mayhem { self.probe(slot, sig, &info, recv, into_slot_ms).await; }
             return;
@@ -219,12 +234,26 @@ impl Bot {
             if info.sol_paired && !info.mayhem {
                 let (_, gf) = self.gate(slot, into_slot_ms);
                 let mut v = json!({"ev": "create_seen", "create_slot": slot, "create_sig": bs58::encode(sig).into_string(),
-                    "mint": info.mint.to_string(), "deployer": info.user.to_string(), "wall_ms": now_ms()});
+                    "mint": info.mint.to_string(), "deployer": info.user.to_string(), "fp": fp, "wall_ms": now_ms()});
                 merge(&mut v, &gf);
                 self.j.log(v);
             }
             return;
         }
+        // fingerprint trigger (the validated rule): armed fingerprint, deployer not heavy (the simulation only covered
+        // deployers with <= 20 SOL-paired launches a day: yesterday's heavy list + our own trailing-24h count)
+        let mut dep_prior = None;
+        if info.sol_paired && !info.mayhem && self.cfg.fp_rules_path.is_some() {
+            let mut s = self.s.lock();
+            let q = s.dep_seen.entry(info.user).or_default();
+            while q.front().is_some_and(|t| t.elapsed() > Duration::from_secs(86_400)) { q.pop_front(); }
+            dep_prior = Some(q.len());
+            q.push_back(Instant::now());
+        }
+        let fp_hit = dep_prior.is_some_and(|n| n < 20) && {
+            let r = self.fp_rules.read();
+            r.armed.contains(&fp) && !r.heavy_deployers.contains(&info.user.to_string())
+        };
         let (rule, buy_sol) = {
             let mut s = self.s.lock();
             let a = s.armed.get(&info.user).cloned();
@@ -232,12 +261,13 @@ impl Bot {
             match (a, explicit) {
                 (Some(a), _) if a.until > Instant::now() => (a.rule, a.buy_sol),
                 (_, true) => ("deployer".to_string(), self.cfg.buy_sol),
+                _ if fp_hit => ("fp".to_string(), self.cfg.buy_sol),
                 _ => return,
             }
             .clone_with(&mut s)
         };
         let base = json!({"mint": info.mint.to_string(), "deployer": info.user.to_string(), "rule": rule,
-            "recv_to_handle_us": recv.elapsed().as_micros() as u64,
+            "fp": fp, "dep_prior_24h": dep_prior, "recv_to_handle_us": recv.elapsed().as_micros() as u64,
             "create_slot": slot, "create_sig": bs58::encode(sig).into_string(), "v2": info.v2,
             "sol_paired": info.sol_paired, "mayhem": info.mayhem});
         if !info.sol_paired || info.mayhem {
@@ -537,12 +567,18 @@ async fn main() -> anyhow::Result<()> {
             "no leader locations in {p}: run  .venv/bin/python research/leaders.py");
     }
     let leaders = leaders::spawn(cfg.rpc_url.clone(), cfg.leaders_path.clone());
+    let fp_rules = match &cfg.fp_rules_path {
+        Some(p) => load_fp_rules(p).map_err(|e| anyhow::anyhow!("{p}: {e} (run  .venv/bin/python research/fp_rules.py)"))?,
+        None => FpRules::default(),
+    };
     let senders = send::Senders::new(cfg.senders.clone());
     let j = Journal::new(&cfg.journal_path);
-    j.log(json!({"ev": "start", "me": me.to_string(), "mode": cfg.mode, "rules": cfg.rules.len(), "funders": funders.len()}));
+    j.log(json!({"ev": "start", "me": me.to_string(), "mode": cfg.mode, "rules": cfg.rules.len(), "funders": funders.len(),
+        "fp_armed": fp_rules.armed.len(), "heavy_deployers": fp_rules.heavy_deployers.len()}));
     let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules), leaders,
         s: Mutex::new(State { armed: HashMap::new(), pending: HashMap::new(), positions: HashMap::new(), curves: HashMap::new(),
-            slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0 }) });
+            slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0,
+            dep_seen: HashMap::new() }), fp_rules: parking_lot::RwLock::new(fp_rules) });
 
     if bot.live() || bot.cfg.mode == "probe" {
         // refuse to trade live without a blockhash or with an empty wallet
@@ -608,6 +644,37 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    if let Some(p) = cfg.fp_rules_path.clone() {
+        let b = bot.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(b.cfg.rules_reload_s)).await;
+                let Ok(r) = load_fp_rules(&p) else { continue };
+                if r.generated_at <= b.fp_rules.read().generated_at { continue; }
+                let (a, h) = (r.armed.len(), r.heavy_deployers.len());
+                *b.fp_rules.write() = r;
+                b.j.log(json!({"ev": "fp_rules_reload", "armed": a, "heavy_deployers": h}));
+            }
+        });
+    }
+    {
+        // SIGTERM (scripts/stop_live.sh): stop buying, let open positions exit (TP or max_hold_s), then quit
+        let b = bot.clone();
+        tokio::spawn(async move {
+            let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) else { return };
+            term.recv().await;
+            b.s.lock().disabled = true;
+            b.j.log(json!({"ev": "draining"}));
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs_f64(b.cfg.max_hold_s + 30.0) {
+                if { let s = b.s.lock(); s.positions.is_empty() && s.pending.is_empty() } { break; }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let left = b.s.lock().positions.len();
+            b.j.log(json!({"ev": "stopped", "open_positions_left": left}));
+            std::process::exit(0);
+        });
+    }
     { let b = bot.clone(); tokio::spawn(async move { loop { b.senders.warm().await; tokio::time::sleep(Duration::from_secs(15)).await; } }); }
     { let b = bot.clone(); tokio::spawn(async move { loop { tokio::time::sleep(Duration::from_millis(200)).await; b.on_timer().await; } }); }
 
@@ -625,9 +692,9 @@ async fn main() -> anyhow::Result<()> {
             last_stats = Instant::now();
         }
         match ev {
-            Ev::Create { slot, sig, info, recv, into_slot_ms } => {
+            Ev::Create { slot, sig, info, recv, into_slot_ms, fp } => {
                 let b = bot.clone();
-                tokio::spawn(async move { b.on_create(slot, sig, info, recv, into_slot_ms).await });
+                tokio::spawn(async move { b.on_create(slot, sig, info, recv, into_slot_ms, fp).await });
             }
             Ev::Trade { slot, idx, sig, signer, ok: _, mint, sol, tok, is_buy, user, vsol, vtok } => {
                 if let Some(m) = bot.on_trade(slot, idx, sig, signer, mint, sol, tok, is_buy, user, vsol, vtok) {

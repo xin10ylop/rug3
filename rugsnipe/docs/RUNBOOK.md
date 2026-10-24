@@ -47,6 +47,33 @@ The gate checks two things:
 
 **Continue to a live micro test** only if the gated run shows ≥ 85% same slot **and** ahead of all rivals on ≥ 40% of ≥ 30 contested launches. The evaluator prints the verdict.
 
+## Step 2: gated live micro test (only after Step 1b passes; ~2 h)
+
+Fund the wallet to **≥ 0.4 SOL**. Positions are 0.03 SOL, at most 3 open, and the bot stops buying for the day at −0.25 SOL.
+
+```bash
+./scripts/live.sh                # starts in the background, PID in data/live.pid
+tail -f data/logs/live_stdout.log | grep -E '"ev":"(buy_sent|buy_fill|sell_fill|skip)"'
+./scripts/eval_live.sh           # any time: on-chain PnL, race outcome per fill, sim vs live
+./scripts/stop_live.sh           # stops buying, lets open positions exit (<= ~60 s), then quits
+```
+
+The trigger is the validated walk-forward rule:
+
+- **Armed fingerprint:** the deployer's create-tx fingerprint is in `bot/configs/fp_rules.json` (601 fingerprints).
+- **Not a heavy deployer:** the deployer launched < 20 SOL-paired coins in the last 24 h, and isn't on yesterday's heavy list.
+- **Race gate:** as in Step 1b.
+- **Exit:** +30% net, or after 30 s.
+- **Control group:** 20% of triggers are skipped on purpose and simulated.
+
+**Pass criteria, fixed before the test (judged on ≥ 60 fills):**
+
+1. ≥ 80% of fills land in the create slot.
+2. Ahead of all rivals on ≥ 40% of ≥ 25 contested fills.
+3. Live minus "sim at our exact position" averages within ±0.3% of position size per trade.
+
+At 0.03 SOL the fixed costs (~0.0007 SOL per round trip, ~2.3%) are expected to make PnL slightly negative, so PnL is reported but not used as a pass or fail at this size. **If the test passes:** set `buy_sol` to 0.1, fund about 3 SOL, and set `daily_loss_limit_sol` to 0.6. Judge on 1–2 days of on-chain PnL.
+
 ## Shared-box notes
 
 - The probe opens one gRPC stream (pre-execution creates only) and polls one blockhash per second.

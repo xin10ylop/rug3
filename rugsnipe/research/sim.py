@@ -66,9 +66,15 @@ def state_before(launch: Launch, pos: int) -> tuple[int, int]:
     return r["vsol"], r["vtok"]
 
 
-def insertion_index(launch: Launch, d_buy: int, where: str = "end", bundle_end_idx: int | None = None) -> int:
-    """Index into launch.rows where our buy is inserted."""
+def insertion_index(launch: Launch, d_buy: int, where: str = "end", bundle_end_idx: int | None = None,
+                    at_idx: int | None = None) -> int:
+    """Index into launch.rows where our buy is inserted. where='at': our actual landing (slot s0+d_buy, index at_idx)."""
     land = launch.s0 + d_buy
+    if where == "at":
+        for i, r in enumerate(launch.rows):
+            if (r["slot"], r["idx"] or 0) > (land, at_idx):
+                return i
+        return len(launch.rows)
     if where == "end":
         for i, r in enumerate(launch.rows):
             if r["slot"] > land:
@@ -100,9 +106,9 @@ def simulate(launch: Launch, *, buy_sol: float, d_buy: int, where: str = "end", 
              tp: float = 1.0, sl: float | None = None, max_hold_slots: int = 2830, d_sell: int = 2,
              fee_rate: float = 0.0125, max_entry_mcap: float | None = None, trailing: float | None = None,
              skip_followers_slots: int = 0, sniper_set: set | None = None,
-             exit_on_big_sell_frac: float | None = None) -> SimResult:
+             exit_on_big_sell_frac: float | None = None, at_idx: int | None = None) -> SimResult:
     """Simulate one round trip. tp/sl are net returns (1.0 = +100%)."""
-    ins = insertion_index(launch, d_buy, where, bundle_end_idx)
+    ins = insertion_index(launch, d_buy, where, bundle_end_idx, at_idx)
     vsol, vtok = state_before(launch, ins)
     em = mcap_sol(vsol, vtok)
     if max_entry_mcap is not None and em > max_entry_mcap:

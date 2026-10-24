@@ -14,13 +14,14 @@ use yellowstone_grpc_proto::geyser::{
     SubscribeRequestFilterTransactions, SubscribeRequestPing,
 };
 
+use crate::fp;
 use crate::pump::{parse_create, parse_trade_event, CreateInfo, EVENT_IX_TAG, PUMP};
 
 #[derive(Debug)]
 pub enum Ev {
     /// create seen pre-execution (deshred); into_slot_ms = time since the first pump tx of that slot reached us
     /// (-1 if the slot had already been superseded), a proxy for how much of the slot is left
-    Create { slot: u64, sig: [u8; 64], info: CreateInfo, recv: std::time::Instant, into_slot_ms: f64 },
+    Create { slot: u64, sig: [u8; 64], info: CreateInfo, recv: std::time::Instant, into_slot_ms: f64, fp: String },
     /// executed pump trade (processed)
     Trade { slot: u64, idx: u64, sig: [u8; 64], signer: Pubkey, ok: bool, mint: Pubkey, sol: u64, tok: u64,
         is_buy: bool, user: Pubkey, vsol: u64, vtok: u64 },
@@ -74,11 +75,15 @@ pub async fn run_deshred(endpoint: String, token: String, tx: mpsc::UnboundedSen
                         let Some(t) = info.transaction.as_ref() else { continue };
                         let Some(m) = t.message.as_ref() else { continue };
                         let keys = keys_of(m, &info.loaded_writable_addresses, &info.loaded_readonly_addresses);
-                        for ix in &m.instructions {
-                            if keys.get(ix.program_id_index as usize) != Some(&PUMP) || ix.data.len() < 8 { continue; }
-                            let accs: Vec<Pubkey> = ix.accounts.iter().filter_map(|&i| keys.get(i as usize).copied()).collect();
-                            if let Some(ci) = parse_create(&ix.data, &accs) {
-                                let _ = tx.send(Ev::Create { slot: u.slot, sig: sig64(&info.signature), info: ci, recv, into_slot_ms });
+                        let tops: Vec<fp::TopIx> = m.instructions.iter().filter_map(|ix| Some(fp::TopIx {
+                            program: *keys.get(ix.program_id_index as usize)?,
+                            accounts: ix.accounts.iter().filter_map(|&i| keys.get(i as usize).copied()).collect(),
+                            data: &ix.data,
+                        })).collect();
+                        for ix in tops.iter().filter(|ix| ix.program == PUMP && ix.data.len() >= 8) {
+                            if let Some(ci) = parse_create(ix.data, &ix.accounts) {
+                                let fp = fp::fingerprint(&tops, &ci.user, m.config.as_ref().map(|c| c.priority_fee));
+                                let _ = tx.send(Ev::Create { slot: u.slot, sig: sig64(&info.signature), info: ci, recv, into_slot_ms, fp });
                             }
                         }
                     }
