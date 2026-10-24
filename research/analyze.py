@@ -68,14 +68,14 @@ def find_snipers(launches, min_launches=15, min_deployers=8, max_off=3):
     return {u for u in seen if len(seen[u]) >= min_launches and len(seen_dep[u]) >= min_deployers}
 
 
-def main():
-    creates = load_creates(BF + "creates_24h.jsonl.gz")
-    funding = load_funding(BF + "funding_24h.jsonl.gz")
+def main(tag="24h"):
+    creates = load_creates(BF + f"creates_{tag}.jsonl.gz")
+    funding = load_funding(BF + f"funding_{tag}.jsonl.gz")
     cmap = {c["mint"]: c for c in creates}
     dep = deployer_table(creates, funding)
     fkind = funder_kinds(dep)
     launches = []
-    for d in iter_trades(BF + "trades_24h.jsonl.gz"):
+    for d in iter_trades(BF + f"trades_{tag}.jsonl.gz"):
         L = load_launch(d)
         if L and L.mint in cmap:
             launches.append(L)
@@ -110,10 +110,10 @@ def main():
         rec["funder_kind"] = fkind.get(d.get("funder"), "none")
         recs.append(rec)
     df = pd.DataFrame(recs)
-    df.to_parquet(BF + "sim_24h.parquet")
+    df.to_parquet(BF + f"sim_{tag}.parquet")
     print("saved", len(df))
     return df
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else "24h")

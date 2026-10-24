@@ -18,6 +18,9 @@ pub struct FunderRule {
 }
 
 fn yes() -> bool { true }
+fn reload_s() -> u64 { 60 }
+fn probe_every() -> u64 { 5 }
+fn probe_max() -> u64 { 200 }
 fn ttl() -> u64 { 6 * 3600 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,7 +33,13 @@ pub struct Config {
     pub senders: Vec<SenderCfg>,
     pub journal_path: String,
 
+    #[serde(default)]
     pub rules: Vec<FunderRule>,
+    /// rules.json written by research/rulegen.py (hot-reloaded)
+    #[serde(default)]
+    pub rules_path: Option<String>,
+    #[serde(default = "reload_s")]
+    pub rules_reload_s: u64,
     #[serde(default)]
     pub deployers: Vec<String>,
     #[serde(default)]
@@ -61,6 +70,11 @@ pub struct Config {
     pub max_buys_per_hour: u32,
     pub consecutive_loss_disable: u32,
     pub control_skip_prob: f64, // A/B: fraction of triggers deliberately skipped (logged as control)
+    /// probe mode: on 1 of every `probe_every` SOL-paired creates, send a no-trade tx with the buy's fee rank
+    #[serde(default = "probe_every")]
+    pub probe_every: u64,
+    #[serde(default = "probe_max")]
+    pub probe_max: u64,
 }
 
 impl Config {

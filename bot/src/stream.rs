@@ -94,11 +94,33 @@ pub async fn run_deshred(endpoint: String, token: String, tx: mpsc::UnboundedSen
 }
 
 /// processed transactions: all pump txs (curve tracking + our fills) and txs of watched funders.
-pub async fn run_processed(endpoint: String, token: String, funders: Vec<Pubkey>, me: Pubkey,
-                           tx: mpsc::UnboundedSender<Ev>) {
-    let funder_set: std::collections::HashSet<Pubkey> = funders.iter().copied().collect();
+fn processed_request(funders: &[Pubkey]) -> SubscribeRequest {
+    let mut txf = HashMap::from([("pump".to_string(), SubscribeRequestFilterTransactions {
+        vote: Some(false), failed: None, signature: None, account_include: vec![PUMP.to_string()],
+        account_exclude: vec![], account_required: vec![], ..Default::default()
+    })]);
+    if !funders.is_empty() {
+        txf.insert("funders".to_string(), SubscribeRequestFilterTransactions {
+            vote: Some(false), failed: Some(false), signature: None,
+            account_include: funders.iter().map(|p| p.to_string()).collect(),
+            account_exclude: vec![], account_required: vec![], ..Default::default()
+        });
+    }
+    SubscribeRequest {
+        transactions: txf,
+        slots: HashMap::from([("s".to_string(), SubscribeRequestFilterSlots {
+            filter_by_commitment: Some(false), interslot_updates: Some(false), ..Default::default() })]),
+        commitment: Some(CommitmentLevel::Processed as i32),
+        ..Default::default()
+    }
+}
+
+pub async fn run_processed(endpoint: String, token: String, mut funders_rx: tokio::sync::watch::Receiver<Vec<Pubkey>>,
+                           me: Pubkey, tx: mpsc::UnboundedSender<Ev>) {
     let mut backoff = 1u64;
     loop {
+        let funders: Vec<Pubkey> = funders_rx.borrow().clone();
+        let mut funder_set: std::collections::HashSet<Pubkey> = funders.iter().copied().collect();
         let r: anyhow::Result<()> = async {
             let mut client = GeyserGrpcClient::build_from_shared(endpoint.clone())?
                 .x_token(Some(token.clone()))?
@@ -109,28 +131,22 @@ pub async fn run_processed(endpoint: String, token: String, funders: Vec<Pubkey>
                 .initial_stream_window_size(8 * 1024 * 1024)
                 .connect()
                 .await?;
-            let mut txf = HashMap::from([("pump".to_string(), SubscribeRequestFilterTransactions {
-                vote: Some(false), failed: None, signature: None, account_include: vec![PUMP.to_string()],
-                account_exclude: vec![], account_required: vec![], ..Default::default()
-            })]);
-            if !funders.is_empty() {
-                txf.insert("funders".to_string(), SubscribeRequestFilterTransactions {
-                    vote: Some(false), failed: Some(false), signature: None,
-                    account_include: funders.iter().map(|p| p.to_string()).collect(),
-                    account_exclude: vec![], account_required: vec![], ..Default::default()
-                });
-            }
-            let req = SubscribeRequest {
-                transactions: txf,
-                slots: HashMap::from([("s".to_string(), SubscribeRequestFilterSlots {
-                    filter_by_commitment: Some(false), interslot_updates: Some(false), ..Default::default() })]),
-                commitment: Some(CommitmentLevel::Processed as i32),
-                ..Default::default()
-            };
+            let mut req = processed_request(&funders);
             let (mut sink, mut stream) = client.subscribe_with_request(Some(req.clone())).await?;
             backoff = 1;
-            while let Some(msg) = stream.next().await {
-                let msg = msg?;
+            loop {
+                let msg = tokio::select! {
+                    m = stream.next() => match m { Some(m) => m?, None => break },
+                    ch = funders_rx.changed() => {
+                        if ch.is_err() { break; }
+                        let nf: Vec<Pubkey> = funders_rx.borrow().clone();
+                        funder_set = nf.iter().copied().collect();
+                        req = processed_request(&nf);
+                        sink.send(req.clone()).await?;
+                        eprintln!("processed stream: funder filter updated ({} funders)", nf.len());
+                        continue;
+                    }
+                };
                 match msg.update_oneof {
                     Some(UpdateOneof::Transaction(u)) => {
                         let slot = u.slot;

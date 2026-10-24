@@ -97,6 +97,8 @@ struct State {
     consec_losses: u32,
     buys_hour: Vec<Instant>,
     disabled: bool,
+    creates_seen: u64,
+    probes_sent: u64,
 }
 
 struct Bot {
@@ -111,13 +113,40 @@ struct Bot {
     s: Mutex<State>,
     tips: Vec<(Pubkey, u64)>,
     sell_tips: Vec<(Pubkey, u64)>,
-    rules: Vec<(Pubkey, config::FunderRule)>,
+    rules: parking_lot::RwLock<Vec<(Pubkey, config::FunderRule)>>,
+}
+
+#[derive(serde::Deserialize)]
+struct RulesFile {
+    rules: Vec<config::FunderRule>,
+    #[serde(default)]
+    armed: Vec<String>,
+    generated_at: f64,
+}
+
+fn load_rules_file(path: &str) -> anyhow::Result<RulesFile> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
 fn now_ms() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1e3 }
 
 impl Bot {
     fn live(&self) -> bool { self.cfg.mode == "live" }
+
+    /// number of transactions in a wallet's history (capped at 8)
+    async fn history_len(&self, w: &Pubkey) -> Option<usize> {
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":[w.to_string(), {"limit": 8, "commitment": "confirmed"}]});
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+        for _ in 0..3 {
+            if let Ok(r) = http.post(&self.cfg.rpc_url).json(&body).send().await {
+                if let Ok(v) = r.json::<serde_json::Value>().await {
+                    if let Some(a) = v["result"].as_array() { return Some(a.len()); }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        None
+    }
 
     /// min tokens out such that our average entry is no worse than entering at `max_mcap` (SOL)
     fn min_tokens_for(&self, spend: u64, max_mcap: f64) -> u64 {
@@ -131,7 +160,31 @@ impl Bot {
         (c.buy_tokens(net) as f64 * 0.995) as u64
     }
 
+    /// Latency probe: no-trade tx (1-lamport self transfer + tip) with the same fee rank and paths as a real buy.
+    async fn probe(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: &pump::CreateInfo, recv: Instant) {
+        let n = {
+            let mut s = self.s.lock();
+            s.creates_seen += 1;
+            if s.creates_seen % self.cfg.probe_every != 0 || s.probes_sent >= self.cfg.probe_max { return; }
+            s.probes_sent += 1;
+            s.probes_sent
+        };
+        let Some(bh) = self.bh.get() else { return };
+        let mut ixs = vec![pump::cu_limit(3_000), pump::cu_price(self.cfg.buy_cu_price)];
+        for (t, l) in &self.tips { ixs.push(pump::transfer(&self.me, t, *l)); }
+        let (wire, tsig) = tx::build_signed(&self.kp, &ixs, &bh);
+        let build_us = recv.elapsed().as_micros() as u64;
+        let res = self.senders.send_all(&wire).await;
+        self.j.log(json!({"ev": "probe_sent", "n": n, "create_slot": slot, "create_sig": bs58::encode(sig).into_string(),
+            "mint": info.mint.to_string(), "deployer": info.user.to_string(), "sig": bs58::encode(tsig).into_string(),
+            "build_us": build_us, "since_recv_ms": recv.elapsed().as_secs_f64() * 1e3, "send": res, "wall_ms": now_ms()}));
+    }
+
     async fn on_create(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: pump::CreateInfo, recv: Instant) {
+        if self.cfg.mode == "probe" {
+            if info.sol_paired && !info.mayhem { self.probe(slot, sig, &info, recv).await; }
+            return;
+        }
         let (rule, buy_sol) = {
             let mut s = self.s.lock();
             let a = s.armed.get(&info.user).cloned();
@@ -144,6 +197,7 @@ impl Bot {
             .clone_with(&mut s)
         };
         let base = json!({"mint": info.mint.to_string(), "deployer": info.user.to_string(), "rule": rule,
+            "recv_to_handle_us": recv.elapsed().as_micros() as u64,
             "create_slot": slot, "create_sig": bs58::encode(sig).into_string(), "v2": info.v2,
             "sol_paired": info.sol_paired, "mayhem": info.mayhem});
         if !info.sol_paired || info.mayhem {
@@ -280,6 +334,32 @@ impl Bot {
         }
     }
 
+    async fn token_balance(&self, ata: &Pubkey) -> Option<u64> {
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"getTokenAccountBalance","params":[ata.to_string(), {"commitment":"confirmed"}]});
+        let http = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+        let v: serde_json::Value = http.post(&self.cfg.rpc_url).json(&body).send().await.ok()?.json().await.ok()?;
+        v["result"]["value"]["amount"].as_str()?.parse().ok()
+    }
+
+    async fn reconcile(self: &Arc<Self>, p: PendingBuy) {
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Some(bal) = self.token_balance(&p.acc.assoc_base_user).await {
+                if bal > 0 {
+                    let mut s = self.s.lock();
+                    if !s.positions.contains_key(&p.mint) {
+                        self.j.log(json!({"ev": "reconciled_position", "mint": p.mint.to_string(), "tokens": bal, "assumed_cost": p.spend}));
+                        s.positions.insert(p.mint, Position { mint: p.mint, deployer: p.deployer, acc: p.acc.clone(), tokens: bal, cost: p.spend,
+                            opened: Instant::now(), create_slot: p.create_slot, fill_slot: 0, fill_idx: 0, peak_mult: 0.0,
+                            selling: None, exit_reason: String::new(), rule: p.rule.clone() });
+                    }
+                    return;
+                }
+                return; // account exists with 0 or does not exist: buy did not land
+            }
+        }
+    }
+
     async fn on_timer(self: &Arc<Self>) {
         let mut to_sell = vec![];
         {
@@ -291,6 +371,9 @@ impl Bot {
             for m in missed {
                 if let Some(p) = s.pending.remove(&m) {
                     self.j.log(json!({"ev": "buy_miss", "mint": m.to_string(), "sig": bs58::encode(p.sig).into_string(), "rule": p.rule}));
+                    // safety: if the buy actually landed but our stream missed the event, adopt the position
+                    let b = self.clone();
+                    tokio::spawn(async move { b.reconcile(p).await });
                 }
             }
             for p in s.positions.values_mut() {
@@ -349,23 +432,95 @@ async fn main() -> anyhow::Result<()> {
     let uva = pump::pda(&[b"user_volume_accumulator", me.as_ref()], &PUMP);
     let tips = cfg.tips.iter().map(|(a, l)| (Pubkey::from_str(a).unwrap(), *l)).collect();
     let sell_tips = cfg.sell_tips.iter().map(|(a, l)| (Pubkey::from_str(a).unwrap(), *l)).collect();
-    let rules: Vec<(Pubkey, config::FunderRule)> = cfg.rules.iter().map(|r| (Pubkey::from_str(&r.funder).unwrap(), r.clone())).collect();
+    let mut rules: Vec<(Pubkey, config::FunderRule)> = cfg.rules.iter().map(|r| (Pubkey::from_str(&r.funder).unwrap(), r.clone())).collect();
+    let mut initial_armed: Vec<String> = vec![];
+    if let Some(rp) = &cfg.rules_path {
+        if let Ok(rf) = load_rules_file(rp) {
+            for r in rf.rules { if let Ok(pk) = Pubkey::from_str(&r.funder) { rules.push((pk, r)); } }
+            initial_armed = rf.armed;
+        }
+    }
     let funders: Vec<Pubkey> = { let mut v: Vec<Pubkey> = rules.iter().map(|r| r.0).collect(); v.sort(); v.dedup(); v };
+    let (funders_tx, funders_rx) = tokio::sync::watch::channel(funders.clone());
     let bh = send::spawn_blockhash_poller(cfg.rpc_url.clone());
     let senders = send::Senders::new(cfg.senders.clone());
     let j = Journal::new(&cfg.journal_path);
     j.log(json!({"ev": "start", "me": me.to_string(), "mode": cfg.mode, "rules": cfg.rules.len(), "funders": funders.len()}));
-    let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules,
+    let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules),
         s: Mutex::new(State { armed: HashMap::new(), pending: HashMap::new(), positions: HashMap::new(), curves: HashMap::new(),
-            slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false }) });
+            slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0 }) });
 
+    if bot.live() || bot.cfg.mode == "probe" {
+        // refuse to trade live without a blockhash or with an empty wallet
+        for _ in 0..50 { if bot.bh.get().is_some() { break; } tokio::time::sleep(Duration::from_millis(200)).await; }
+        anyhow::ensure!(bot.bh.get().is_some(), "no blockhash from RPC; refusing to start live");
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"getBalance","params":[me.to_string(), {"commitment":"confirmed"}]});
+        let v: serde_json::Value = reqwest::Client::new().post(&cfg.rpc_url).json(&body).send().await?.json().await?;
+        let bal = v["result"]["value"].as_u64().unwrap_or(0);
+        bot.j.log(json!({"ev": "balance", "lamports": bal}));
+        anyhow::ensure!(bal as f64 / 1e9 >= cfg.buy_sol + 0.02, "wallet balance {} SOL too low for buy_sol {}", bal as f64 / 1e9, cfg.buy_sol);
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Ev>();
     tokio::spawn(stream::run_deshred(cfg.grpc_url.clone(), cfg.grpc_token.clone(), tx.clone()));
-    tokio::spawn(stream::run_processed(cfg.grpc_url.clone(), cfg.grpc_token.clone(), funders, me, tx.clone()));
+    tokio::spawn(stream::run_processed(cfg.grpc_url.clone(), cfg.grpc_token.clone(), funders_rx, me, tx.clone()));
+    {
+        let mut s = bot.s.lock();
+        for a in &initial_armed {
+            if let Ok(pk) = Pubkey::from_str(a) {
+                s.armed.insert(pk, Armed { rule: "prearmed".into(), until: Instant::now() + Duration::from_secs(3 * 3600), buy_sol: cfg.buy_sol });
+            }
+        }
+    }
+    if let Some(rp) = cfg.rules_path.clone() {
+        let b = bot.clone();
+        let static_rules: Vec<(Pubkey, config::FunderRule)> = cfg.rules.iter().map(|r| (Pubkey::from_str(&r.funder).unwrap(), r.clone())).collect();
+        tokio::spawn(async move {
+            let mut last_gen = 0.0f64;
+            loop {
+                tokio::time::sleep(Duration::from_secs(b.cfg.rules_reload_s)).await;
+                let Ok(rf) = load_rules_file(&rp) else { continue };
+                if rf.generated_at <= last_gen { continue; }
+                last_gen = rf.generated_at;
+                let mut nr = static_rules.clone();
+                for r in rf.rules { if let Ok(pk) = Pubkey::from_str(&r.funder) { nr.push((pk, r)); } }
+                let mut f: Vec<Pubkey> = nr.iter().map(|r| r.0).collect();
+                f.sort();
+                f.dedup();
+                let n_rules = nr.len();
+                *b.rules.write() = nr;
+                let mut added = 0;
+                {
+                    let mut s = b.s.lock();
+                    for a in &rf.armed {
+                        if let Ok(pk) = Pubkey::from_str(a) {
+                            if !s.armed.contains_key(&pk) {
+                                s.armed.insert(pk, Armed { rule: "prearmed".into(), until: Instant::now() + Duration::from_secs(3 * 3600), buy_sol: b.cfg.buy_sol });
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+                let changed = *funders_tx.borrow() != f;
+                if changed { let _ = funders_tx.send(f.clone()); }
+                b.j.log(json!({"ev": "rules_reload", "rules": n_rules, "funders": f.len(), "armed_added": added, "filter_changed": changed}));
+            }
+        });
+    }
     { let b = bot.clone(); tokio::spawn(async move { loop { b.senders.warm().await; tokio::time::sleep(Duration::from_secs(15)).await; } }); }
     { let b = bot.clone(); tokio::spawn(async move { loop { tokio::time::sleep(Duration::from_millis(200)).await; b.on_timer().await; } }); }
 
+    let mut cnt: HashMap<&'static str, u64> = HashMap::new();
+    let mut last_stats = Instant::now();
     while let Some(ev) = rx.recv().await {
+        *cnt.entry(match &ev { Ev::Create { .. } => "create", Ev::Trade { .. } => "trade", Ev::Funding { .. } => "funding",
+            Ev::Failed { .. } => "failed", Ev::Slot { .. } => "slot" }).or_insert(0) += 1;
+        if last_stats.elapsed() > Duration::from_secs(60) {
+            let (armed, open, pending, slot) = { let s = bot.s.lock(); (s.armed.len(), s.positions.len(), s.pending.len(), s.slot) };
+            bot.j.log(json!({"ev": "stats", "per_min": cnt, "armed": armed, "open": open, "pending": pending, "slot": slot,
+                "blockhash_ok": bot.bh.get().is_some()}));
+            cnt.clear();
+            last_stats = Instant::now();
+        }
         match ev {
             Ev::Create { slot, sig, info, recv } => {
                 let b = bot.clone();
@@ -378,13 +533,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Ev::Funding { slot, funder, to, lamports, to_pre_balance } => {
-                for (f, r) in &bot.rules {
+                let rules = bot.rules.read().clone();
+                for (f, r) in &rules {
                     if *f == funder && lamports >= r.min_lamports && lamports <= r.max_lamports && (!r.fresh_only || to_pre_balance == 0) {
                         let mut s = bot.s.lock();
                         s.armed.insert(to, Armed { rule: r.name.clone(), until: Instant::now() + Duration::from_secs(r.ttl_s),
                             buy_sol: r.buy_sol.unwrap_or(bot.cfg.buy_sol) });
                         drop(s);
                         bot.j.log(json!({"ev": "arm", "rule": r.name, "wallet": to.to_string(), "lamports": lamports, "slot": slot}));
+                        if r.fresh_only {
+                            // a zero pre-balance can be a drained old wallet: verify history, disarm if not fresh
+                            let b = bot.clone();
+                            tokio::spawn(async move {
+                                match b.history_len(&to).await {
+                                    Some(n) if n > 4 => {
+                                        b.s.lock().armed.remove(&to);
+                                        b.j.log(json!({"ev": "disarm", "why": "not_fresh", "wallet": to.to_string(), "txs": n}));
+                                    }
+                                    None => b.j.log(json!({"ev": "fresh_check_failed", "wallet": to.to_string()})),
+                                    _ => {}
+                                }
+                            });
+                        }
                     }
                 }
             }

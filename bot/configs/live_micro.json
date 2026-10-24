@@ -1,0 +1,51 @@
+{
+  "mode": "live",
+  "rpc_url": "${TRITON_RPC_URL}",
+  "grpc_url": "https://riptide.rpcpool.com:443",
+  "grpc_token": "${TRITON_X_TOKEN}",
+  "keypair_path": "${RUGBOT_KEYPAIR}",
+  "senders": [
+    {
+      "name": "helius_fra_swqos",
+      "kind": "jsonrpc",
+      "url": "http://fra-sender.helius-rpc.com/fast?swqos_only=true"
+    },
+    {
+      "name": "triton_sendtx",
+      "kind": "raw",
+      "url": "${TRITON_RPC_URL}/sendtx"
+    }
+  ],
+  "journal_path": "/root/rug3/data/journal_live.jsonl",
+  "buy_sol": 0.02,
+  "buy_slippage": 0.3,
+  "buy_cu_limit": 120000,
+  "buy_cu_price": 4000000,
+  "tips": [
+    [
+      "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
+      10000
+    ]
+  ],
+  "sell_tips": [
+    [
+      "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
+      10000
+    ]
+  ],
+  "sell_cu_limit": 90000,
+  "sell_cu_price": 2000000,
+  "max_entry_mcap_sol": 60.0,
+  "tp": 0.3,
+  "sl": null,
+  "max_hold_s": 30.0,
+  "trailing": null,
+  "exit_on_deployer_sell": false,
+  "max_open": 2,
+  "daily_loss_limit_sol": 0.15,
+  "max_buys_per_hour": 20,
+  "consecutive_loss_disable": 8,
+  "control_skip_prob": 0.25,
+  "rules_path": "/root/rug3/data/live/rules.json",
+  "rules_reload_s": 60
+}
