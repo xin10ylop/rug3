@@ -91,6 +91,19 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
 | gated, at 40% wins | ~1,350 | +0.6 / +1.5 SOL/day | +2.8 / +5.4 SOL/day |
 | gated break-even win rate | | 31% / 17% | 22% / 8% |
 
+**By trade size (frozen fingerprint list, as the bot uses it).** Each day is simulated with a list frozen *before* it (d-2 from d-3; d-1 from d-3+d-2). Gate pass 36%, 95% same slot on uncontested launches, and 3% of creates invisible. Each trade costs 0.00082 SOL: fees and tips, failed transactions, and buys on creates that fail. Our buy's own price impact is carried through the replay. About 1,200–1,350 trades/day at any size.
+
+| per trade | SOL/day at 52% wins | at 40% wins | per trade (52%) | day p5 | intraday drawdown p95 |
+|---|---|---|---|---|---|
+| 0.05 | +0.5 / +0.7 | +0.2 / +0.4 | +0.7 / +1.1% | −0.2 / −0.3 | 0.8–0.9 |
+| 0.10 | +2.0 / +2.2 | +1.4 / +1.6 | +1.5 / +1.9% | +0.5 / +0.7 | 1.3 |
+| 0.25 | +6.1 / +6.6 | +4.5 / +5.1 | +1.8 / +2.2% | +1.8 / +2.5 | 2.7–3.2 |
+| 0.50 | +11.3 / +12.6 | +8.1 / +9.6 | +1.7 / +2.1% | +3.8 / +4.1 | 5.8–6.0 |
+| 1.00 | +15.5 / +19.8 | +9.3 / +14.0 | +1.2 / +1.7% | +1.5 / +2.1 | 13 |
+
+- **Size:** the edge per trade peaks around 0.25 SOL. Below that, fixed costs dominate; above it, our own price impact does.
+- **Untested above 0.5 SOL:** the replay assumes other traders act the same whatever our size. That assumption is weakest above 0.5 SOL, so don't size up past that without live data.
+
 **Real-time gate calibration (124 creates, watch mode):** "ms since the slot's first pump tx reached us" tracks the create's final position in its block (corr 0.89; block midpoint ≈ 60–75 ms). Of creates seen ≤ 60 ms into their slot, 93% are in the first half of the block, and this captures 87% of first-half creates. The gated config therefore uses `gate_max_into_slot_ms = 60` with `gate_max_leader_km = 1200`.
 
 **Intraday drawdown (gated, 200 resampled days):** at 0.10 SOL/trade, median 0.7–0.85 SOL and p95 1.2–1.6 SOL. At 0.25 SOL/trade, median 1.5–1.9 SOL and p95 2.7–3.0 SOL. A 1 SOL bankroll therefore covers the live verification test (0.02–0.05 SOL/trade), not production.
