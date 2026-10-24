@@ -117,3 +117,30 @@ Costs are the measured path's: 0.00074 SOL per round trip. Contested launches us
   - 12–19% of creates seen before execution fail on chain. A buy triggered by one fails too, at ~0.0005 SOL.
 - **Rule:** `bot/configs/fp_rules.json` uses the walk-forward rule frozen at the end of the data (≤ 2 h before the test). That is 601 armed fingerprints covering 39% of launches, minus 102 heavy deployers. In the persistence test, a list frozen on day −3 kept 95% of the walk-forward value on day −2 and 55% on day −1. Rebuild it daily from fresh data (`research/fp_rules.py`).
 - **Dry run of `live_gated.json` (7 min, no sends):** 28 fingerprint triggers, 10 passed the race gate (~1.4 buys/min). The SIGTERM drain stopped cleanly.
+
+## First live trades (2026-10-24, ~15:48 UTC, 0.03 SOL each): the edge disappears when we take the trade
+
+10 round trips in 5.7 minutes, all gated and all on armed fingerprints. **10 of 10 lost: −0.065 SOL in total, −15.4% per trade.**
+
+- **Execution worked:**
+  - Every fill landed in the create slot, first after the dev bundle.
+  - The one contested launch was won, ahead of 5 snipers.
+  - Sells fired on time.
+  - The simulator at our exact position reproduces each closed trade to the lamport (the first also paid a one-time ~0.0013 SOL account rent).
+- **The same rule on launches we did not trade:**
+
+| launches (same armed list, chain data) | n | sim as first, per trade | winners | outside buys in first 30 s (p50) |
+|---|---|---|---|---|
+| same 5.7 min, not traded | 17 | +8.0% | 53% | 2.71 SOL |
+| same 5.7 min, not traded, gate pass | 6 | +5.1% | 50% | 1.79 SOL |
+| last 75 min, not traded, gate pass | 98 | +2.6% | 28% | 0.46–0.75 SOL |
+| last 75 min, not traded, all | 262 | +1.2% | 28% | — |
+| **traded by us** | **10** | **−15.4%** | **0%** | **0.10 SOL** |
+
+- **Ruled out:**
+  - The gate: gated launches did better than ungated.
+  - Launch type: high-priority creators did +6.4% when we were not in.
+  - Our price impact: the replay with our trades removed still gives −15.4%.
+- **What differs:** after our buy, outside buyers mostly stayed away (5 of 10 launches had almost none). Insiders sold sooner (median 8 vs 17 slots after the create, and a larger share of their tokens).
+- **Interpretation:** chance would produce this ~1–3% of the time. The likely explanation is that **taking the first-buyer spot changes what follows it**, and a replay of other traders' recorded behaviour cannot show that. This is the same failure as the Oct 21–23 analysis ("the difference appears after the first buy"). It is not fixable with speed.
+- **Decision:** stop. The way to resolve it definitively is ~40 more trades with the 20% control group, ≤ ~0.2 SOL at risk. Not recommended.
