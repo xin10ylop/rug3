@@ -30,6 +30,23 @@ The verdict compares where it lands against the create and the rival snipers.
 
 **Continue** only if we land in the create slot in ≥ 60% of probes **and** are ahead of all slot-0 rivals in ≥ 40% of contested launches. Otherwise, don't trade rugger-sniping.
 
+**Result on 2026-10-24: ungated no-go** (56–65% same slot, 33–38% contested wins). There is a promising sub-case: the slot leader is in Europe and the create comes early in its slot. See docs/REPORT.md.
+
+## Step 1b: gated probe (~40 min, ~0.006 SOL)
+
+```bash
+cd ~/rugsnipe-repo && git pull && cd rugsnipe && (cd bot && cargo build --release)
+./scripts/eval_probe.sh          # re-evaluate the first run without the duplicate probes (no SOL)
+./scripts/probe.sh gated         # locates leaders, then probes only gated creates
+```
+
+The gate checks two things:
+
+- the create's slot leader is < 1200 km from the box (`data/live/leaders.json`, rebuilt by `research/leaders.py` every 6 h)
+- the create reached us ≤ 60 ms after its slot's first pump transaction (`gate_max_into_slot_ms`, about the first half of the block)
+
+**Continue to a live micro test** only if the gated run shows ≥ 85% same slot **and** ahead of all rivals on ≥ 40% of ≥ 30 contested launches. The evaluator prints the verdict.
+
 ## Shared-box notes
 
 - The probe opens one gRPC stream (pre-execution creates only) and polls one blockhash per second.

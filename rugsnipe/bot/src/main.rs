@@ -7,6 +7,7 @@
 //! Every decision is journaled (JSONL) so live P&L is computed only from trades that actually executed.
 
 mod config;
+mod leaders;
 mod pump;
 mod send;
 mod stream;
@@ -114,6 +115,7 @@ struct Bot {
     tips: Vec<(Pubkey, u64)>,
     sell_tips: Vec<(Pubkey, u64)>,
     rules: parking_lot::RwLock<Vec<(Pubkey, config::FunderRule)>>,
+    leaders: Arc<leaders::Leaders>,
 }
 
 #[derive(serde::Deserialize)]
@@ -130,8 +132,25 @@ fn load_rules_file(path: &str) -> anyhow::Result<RulesFile> {
 
 fn now_ms() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1e3 }
 
+fn merge(v: &mut serde_json::Value, extra: &serde_json::Value) {
+    if let (Some(a), Some(b)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, x) in b { a.insert(k.clone(), x.clone()); }
+    }
+}
+
 impl Bot {
     fn live(&self) -> bool { self.cfg.mode == "live" }
+
+    /// Race gate: is the create's slot leader close to this box, and did the create reach us early in its slot?
+    /// Returns (pass, journal fields). Unknown leader/location or a superseded slot fails a configured gate.
+    fn gate(&self, slot: u64, into_slot_ms: f64) -> (bool, serde_json::Value) {
+        let leader = self.leaders.leader(slot);
+        let g = leader.map(|l| self.leaders.geo(&l)).unwrap_or_default();
+        let near = self.cfg.gate_max_leader_km.map_or(true, |m| g.km.is_some_and(|k| k < m));
+        let early = self.cfg.gate_max_into_slot_ms.map_or(true, |m| (0.0..=m).contains(&into_slot_ms));
+        (near && early, json!({"leader": leader.map(|l| l.to_string()), "leader_km": g.km, "leader_city": g.city,
+            "into_slot_ms": (into_slot_ms * 10.0).round() / 10.0, "gate": near && early}))
+    }
 
     /// number of transactions in a wallet's history (capped at 8)
     async fn history_len(&self, w: &Pubkey) -> Option<usize> {
@@ -161,7 +180,14 @@ impl Bot {
     }
 
     /// Latency probe: no-trade tx (1-lamport self transfer + tip) with the same fee rank and paths as a real buy.
-    async fn probe(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: &pump::CreateInfo, recv: Instant) {
+    async fn probe(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: &pump::CreateInfo, recv: Instant, into_slot_ms: f64) {
+        let (pass, gf) = self.gate(slot, into_slot_ms);
+        if !pass {
+            let mut v = json!({"ev": "probe_skip", "why": "gate", "create_slot": slot, "mint": info.mint.to_string()});
+            merge(&mut v, &gf);
+            self.j.log(v);
+            return;
+        }
         let n = {
             let mut s = self.s.lock();
             s.creates_seen += 1;
@@ -170,19 +196,33 @@ impl Bot {
             s.probes_sent
         };
         let Some(bh) = self.bh.get() else { return };
-        let mut ixs = vec![pump::cu_limit(3_000), pump::cu_price(self.cfg.buy_cu_price)];
+        // +n micro-lamports/CU makes every probe a distinct tx: two probes built on the same blockhash were
+        // byte-identical (same signature), so the network kept only the first
+        let mut ixs = vec![pump::cu_limit(3_000), pump::cu_price(self.cfg.buy_cu_price + n)];
         for (t, l) in &self.tips { ixs.push(pump::transfer(&self.me, t, *l)); }
         let (wire, tsig) = tx::build_signed(&self.kp, &ixs, &bh);
         let build_us = recv.elapsed().as_micros() as u64;
         let res = self.senders.send_all(&wire).await;
-        self.j.log(json!({"ev": "probe_sent", "n": n, "create_slot": slot, "create_sig": bs58::encode(sig).into_string(),
+        let mut v = json!({"ev": "probe_sent", "n": n, "create_slot": slot, "create_sig": bs58::encode(sig).into_string(),
             "mint": info.mint.to_string(), "deployer": info.user.to_string(), "sig": bs58::encode(tsig).into_string(),
-            "build_us": build_us, "since_recv_ms": recv.elapsed().as_secs_f64() * 1e3, "send": res, "wall_ms": now_ms()}));
+            "build_us": build_us, "since_recv_ms": recv.elapsed().as_secs_f64() * 1e3, "send": res, "wall_ms": now_ms()});
+        merge(&mut v, &gf);
+        self.j.log(v);
     }
 
-    async fn on_create(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: pump::CreateInfo, recv: Instant) {
+    async fn on_create(self: &Arc<Self>, slot: u64, sig: [u8; 64], info: pump::CreateInfo, recv: Instant, into_slot_ms: f64) {
         if self.cfg.mode == "probe" {
-            if info.sol_paired && !info.mayhem { self.probe(slot, sig, &info, recv).await; }
+            if info.sol_paired && !info.mayhem { self.probe(slot, sig, &info, recv, into_slot_ms).await; }
+            return;
+        }
+        if self.cfg.mode == "watch" {
+            if info.sol_paired && !info.mayhem {
+                let (_, gf) = self.gate(slot, into_slot_ms);
+                let mut v = json!({"ev": "create_seen", "create_slot": slot, "create_sig": bs58::encode(sig).into_string(),
+                    "mint": info.mint.to_string(), "deployer": info.user.to_string(), "wall_ms": now_ms()});
+                merge(&mut v, &gf);
+                self.j.log(v);
+            }
             return;
         }
         let (rule, buy_sol) = {
@@ -202,6 +242,13 @@ impl Bot {
             "sol_paired": info.sol_paired, "mayhem": info.mayhem});
         if !info.sol_paired || info.mayhem {
             self.j.log(json!({"ev": "skip", "why": "not_sol_or_mayhem", "d": base}));
+            return;
+        }
+        let (pass, gf) = self.gate(slot, into_slot_ms);
+        let mut base = base;
+        merge(&mut base, &gf);
+        if !pass {
+            self.j.log(json!({"ev": "skip", "why": "gate", "d": base}));
             return;
         }
         // risk gates
@@ -361,6 +408,7 @@ impl Bot {
     }
 
     async fn on_timer(self: &Arc<Self>) {
+        if self.cfg.mode == "watch" { return; }
         if self.cfg.mode == "probe" {
             let done = { let s = self.s.lock(); s.probes_sent >= self.cfg.probe_max };
             if done {
@@ -483,10 +531,16 @@ async fn main() -> anyhow::Result<()> {
     let funders: Vec<Pubkey> = { let mut v: Vec<Pubkey> = rules.iter().map(|r| r.0).collect(); v.sort(); v.dedup(); v };
     let (funders_tx, funders_rx) = tokio::sync::watch::channel(funders.clone());
     let bh = send::spawn_blockhash_poller(cfg.rpc_url.clone());
+    if cfg.gate_max_leader_km.is_some() {
+        let p = cfg.leaders_path.as_deref().ok_or_else(|| anyhow::anyhow!("gate_max_leader_km needs leaders_path"))?;
+        anyhow::ensure!(leaders::load_geo(p).map_or(false, |g| !g.is_empty()),
+            "no leader locations in {p}: run  .venv/bin/python research/leaders.py");
+    }
+    let leaders = leaders::spawn(cfg.rpc_url.clone(), cfg.leaders_path.clone());
     let senders = send::Senders::new(cfg.senders.clone());
     let j = Journal::new(&cfg.journal_path);
     j.log(json!({"ev": "start", "me": me.to_string(), "mode": cfg.mode, "rules": cfg.rules.len(), "funders": funders.len()}));
-    let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules),
+    let bot = Arc::new(Bot { cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules), leaders,
         s: Mutex::new(State { armed: HashMap::new(), pending: HashMap::new(), positions: HashMap::new(), curves: HashMap::new(),
             slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0 }) });
 
@@ -500,10 +554,15 @@ async fn main() -> anyhow::Result<()> {
         bot.j.log(json!({"ev": "balance", "lamports": bal}));
         anyhow::ensure!(bal as f64 / 1e9 >= cfg.buy_sol + 0.02, "wallet balance {} SOL too low for buy_sol {}", bal as f64 / 1e9, cfg.buy_sol);
     }
+    if bot.cfg.gate_max_leader_km.is_some() || bot.cfg.mode == "watch" {
+        for _ in 0..50 { if bot.leaders.has_schedule() { break; } tokio::time::sleep(Duration::from_millis(200)).await; }
+        anyhow::ensure!(bot.leaders.has_schedule(), "no leader schedule from RPC");
+        bot.j.log(json!({"ev": "leaders", "located": bot.leaders.n_geo()}));
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Ev>();
     tokio::spawn(stream::run_deshred(cfg.grpc_url.clone(), cfg.grpc_token.clone(), tx.clone()));
-    if cfg.mode != "probe" {
-        // probe mode only needs the pre-execution create stream: keep CPU/bandwidth low on a shared box
+    if cfg.mode != "probe" && cfg.mode != "watch" {
+        // probe/watch only need the pre-execution create stream: keep CPU/bandwidth low on a shared box
         tokio::spawn(stream::run_processed(cfg.grpc_url.clone(), cfg.grpc_token.clone(), funders_rx, me, tx.clone()));
     }
     {
@@ -566,9 +625,9 @@ async fn main() -> anyhow::Result<()> {
             last_stats = Instant::now();
         }
         match ev {
-            Ev::Create { slot, sig, info, recv } => {
+            Ev::Create { slot, sig, info, recv, into_slot_ms } => {
                 let b = bot.clone();
-                tokio::spawn(async move { b.on_create(slot, sig, info, recv).await });
+                tokio::spawn(async move { b.on_create(slot, sig, info, recv, into_slot_ms).await });
             }
             Ev::Trade { slot, idx, sig, signer, ok: _, mint, sol, tok, is_buy, user, vsol, vtok } => {
                 if let Some(m) = bot.on_trade(slot, idx, sig, signer, mint, sol, tok, is_buy, user, vsol, vtok) {

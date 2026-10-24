@@ -57,3 +57,40 @@ Over 3 days of full data, the edge in rugger-sniping is **speed, winner-take-all
 Every rule that avoids the race and looked profitable in-sample **failed out-of-sample**. That reproduces your Oct 21–23 finding with an independent method. **No capital should go into the rule-based strategy.**
 
 The one hypothesis still worth testing is whether your Frankfurt box can win the slot-0 race on contested launches. It costs ~0.01 SOL to answer with probes (see RUNBOOK). If the race is winnable, the contested-launch segment was worth +13.8% per trade to the first buyer, which is large enough to pay for aggressive fees.
+
+## Race probe from the Frankfurt box (2026-10-24, 15:00 UTC)
+
+200 no-trade probes (compute budget plus a 10k-lamport Helius SWQoS tip, also sent via Triton Cascade). Each was sent 1.1 ms (p50) after the create showed up in the deshred stream.
+
+**Probe bug (fixed):** 29 probes were byte-identical to an earlier probe built on the same blockhash. The network kept only the first copy, so the first evaluation counted those 29 against the wrong create. They produced the 17 "landed before the create" rows. Each probe is now unique (`cu_price + n`), and the evaluator drops duplicates.
+
+| 171 distinct probes | same slot as create | ahead of all slot-0 rivals (contested launches) |
+|---|---|---|
+| all | 56–65% | 33–38% (15 of 40–46) |
+| leader < 100 km (Frankfurt) | 88% | 19% (3/16) |
+| leader 100–1200 km (AMS, LON, …) | 72% | 55% (11/20) |
+| leader ≥ 1200 km (US, Asia) | 22% | 25% (1/4) |
+| create in first third of its block | 91% | 57% (8/14) |
+| create in last third | 36% | 0% (0/4) |
+| **leader < 1200 km and create in first half** | **96%** | **55% (12/22)** |
+
+Ranges cover two ways of treating 25 probes whose create never succeeded on chain.
+
+- **Ungated:** below the bar (≥ 60% same slot **and** ≥ 40% contested wins). No-go, as decided in advance.
+- **Gated:** the gated row was found by slicing the same 146 probes, so it is a **hypothesis**. It needs a fresh gated run (`./scripts/probe.sh gated`), judged against a bar fixed now: **≥ 85% same slot and ≥ 40% ahead of all rivals on ≥ 30 contested launches.**
+- **Likely cause:** the rivals sit in Frankfurt. When the leader is also in Frankfurt they beat us (19%). When the leader is in Amsterdam or London everyone is ~7–10 ms away, and we win more often than not. Under the gate, this is about 74% of stake (35% Frankfurt metro, 39% rest of Europe).
+
+### What the measured odds are worth (simulator, fingerprint rule, out-of-sample days d-3 / d-2)
+
+Costs are the measured path's: 0.00074 SOL per round trip. Contested launches use the measured win rate (won → `b0start`, lost in the same slot → `b0end`, later slot → `b1`). Uncontested launches use the measured same-slot rate.
+
+| | trades/day | 0.10 SOL/trade | 0.25 SOL/trade |
+|---|---|---|---|
+| ungated (measured: 38% wins, 55% same slot on uncontested) | ~3,600 | −2.1 / −0.3 SOL/day | −1.4 / +3.4 SOL/day |
+| gated (if 55% wins, 94% same slot hold up) | ~1,350 | +1.4 / +2.5 SOL/day | +5.0 / +7.8 SOL/day |
+| gated, at 40% wins | ~1,350 | +0.6 / +1.5 SOL/day | +2.8 / +5.4 SOL/day |
+| gated break-even win rate | | 31% / 17% | 22% / 8% |
+
+**Real-time gate calibration (124 creates, watch mode):** "ms since the slot's first pump tx reached us" tracks the create's final position in its block (corr 0.89; block midpoint ≈ 60–75 ms). Of creates seen ≤ 60 ms into their slot, 93% are in the first half of the block, and this captures 87% of first-half creates. The gated config therefore uses `gate_max_into_slot_ms = 60` with `gate_max_leader_km = 1200`.
+
+**Intraday drawdown (gated, 200 resampled days):** at 0.10 SOL/trade, median 0.7–0.85 SOL and p95 1.2–1.6 SOL. At 0.25 SOL/trade, median 1.5–1.9 SOL and p95 2.7–3.0 SOL. A 1 SOL bankroll therefore covers the live verification test (0.02–0.05 SOL/trade), not production.

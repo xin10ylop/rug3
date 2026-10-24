@@ -18,8 +18,9 @@ use crate::pump::{parse_create, parse_trade_event, CreateInfo, EVENT_IX_TAG, PUM
 
 #[derive(Debug)]
 pub enum Ev {
-    /// create seen pre-execution (deshred)
-    Create { slot: u64, sig: [u8; 64], info: CreateInfo, recv: std::time::Instant },
+    /// create seen pre-execution (deshred); into_slot_ms = time since the first pump tx of that slot reached us
+    /// (-1 if the slot had already been superseded), a proxy for how much of the slot is left
+    Create { slot: u64, sig: [u8; 64], info: CreateInfo, recv: std::time::Instant, into_slot_ms: f64 },
     /// executed pump trade (processed)
     Trade { slot: u64, idx: u64, sig: [u8; 64], signer: Pubkey, ok: bool, mint: Pubkey, sol: u64, tok: u64,
         is_buy: bool, user: Pubkey, vsol: u64, vtok: u64 },
@@ -61,11 +62,14 @@ pub async fn run_deshred(endpoint: String, token: String, tx: mpsc::UnboundedSen
             let req = SubscribeDeshredRequest { deshred_transactions: filt.clone(), ..Default::default() };
             let (mut sink, mut stream) = client.subscribe_deshred_with_request(Some(req)).await?;
             backoff = 1;
+            let mut slot_first: (u64, std::time::Instant) = (0, std::time::Instant::now());
             while let Some(msg) = stream.next().await {
                 let msg = msg?;
                 match msg.update_oneof {
                     Some(subscribe_update_deshred::UpdateOneof::DeshredTransaction(u)) => {
                         let recv = std::time::Instant::now();
+                        if u.slot > slot_first.0 { slot_first = (u.slot, recv); }
+                        let into_slot_ms = if u.slot == slot_first.0 { (recv - slot_first.1).as_secs_f64() * 1e3 } else { -1.0 };
                         let Some(info) = u.transaction.as_ref() else { continue };
                         let Some(t) = info.transaction.as_ref() else { continue };
                         let Some(m) = t.message.as_ref() else { continue };
@@ -74,7 +78,7 @@ pub async fn run_deshred(endpoint: String, token: String, tx: mpsc::UnboundedSen
                             if keys.get(ix.program_id_index as usize) != Some(&PUMP) || ix.data.len() < 8 { continue; }
                             let accs: Vec<Pubkey> = ix.accounts.iter().filter_map(|&i| keys.get(i as usize).copied()).collect();
                             if let Some(ci) = parse_create(&ix.data, &accs) {
-                                let _ = tx.send(Ev::Create { slot: u.slot, sig: sig64(&info.signature), info: ci, recv });
+                                let _ = tx.send(Ev::Create { slot: u.slot, sig: sig64(&info.signature), info: ci, recv, into_slot_ms });
                             }
                         }
                     }

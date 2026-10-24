@@ -25,7 +25,7 @@ fn ttl() -> u64 { 6 * 3600 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub mode: String, // "live" | "dry"
+    pub mode: String, // "live" | "dry" | "probe" | "watch" (log every create with its gate fields; sends nothing)
     pub rpc_url: String,
     pub grpc_url: String,
     pub grpc_token: String,
@@ -75,6 +75,15 @@ pub struct Config {
     pub probe_every: u64,
     #[serde(default = "probe_max")]
     pub probe_max: u64,
+
+    /// race gate (probe + live): act only if the create's slot leader is within `gate_max_leader_km` of this box
+    /// (locations from research/leaders.py) and the create reached us within `gate_max_into_slot_ms` of its slot's start
+    #[serde(default)]
+    pub leaders_path: Option<String>,
+    #[serde(default)]
+    pub gate_max_leader_km: Option<f64>,
+    #[serde(default)]
+    pub gate_max_into_slot_ms: Option<f64>,
 }
 
 impl Config {
