@@ -74,6 +74,14 @@ The trigger is the validated walk-forward rule:
 
 At 0.03 SOL the fixed costs (~0.0007 SOL per round trip, ~2.3%) are expected to make PnL slightly negative, so PnL is reported but not used as a pass or fail at this size. **If the test passes:** set `buy_sol` to 0.1, fund about 3 SOL, and set `daily_loss_limit_sol` to 0.6. Judge on 1–2 days of on-chain PnL.
 
+## Step 2b: randomized presence test at 0.01 SOL (the current step)
+
+`./scripts/live.sh small` trades 0.01 SOL per trigger and skips 50% of triggers at random. The bot logs every trade on both halves from its own stream (`obs` / `obs_create` journal events), so `eval_live.sh` needs no RPC history index. Triton's index lagged by more than an hour on 2026-10-24. Aim for ~150 bought and ~150 skipped (~3.5–4 h, ~0.15 SOL in fees).
+
+- **Read 1:** the `PRESENCE TEST` line. Bought is live, skipped is simulated from the same log. If bought is worse by more than 2 standard errors, our presence hurts: stop.
+- **Read 2:** the bought half's average before fees, against the simulator's ≈ +2.4% per trade.
+- **Check:** `reserve jumps` must be 0 (the trade log is complete).
+
 ## Shared-box notes
 
 - The probe opens one gRPC stream (pre-execution creates only) and polls one blockhash per second.

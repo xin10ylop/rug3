@@ -15,7 +15,7 @@ use yellowstone_grpc_proto::geyser::{
 };
 
 use crate::fp;
-use crate::pump::{parse_create, parse_trade_event, CreateInfo, EVENT_IX_TAG, PUMP};
+use crate::pump::{parse_create, parse_create_event_mint, parse_trade_event, CreateInfo, EVENT_IX_TAG, PUMP};
 
 #[derive(Debug)]
 pub enum Ev {
@@ -30,6 +30,8 @@ pub enum Ev {
     /// SOL transfer out of a watched funder (processed)
     Funding { slot: u64, funder: Pubkey, to: Pubkey, lamports: u64, to_pre_balance: u64 },
     Slot { slot: u64, status: i32 },
+    /// executed create (processed): in-block position, for the trade log of observed launches
+    CreateExec { slot: u64, idx: u64, mint: Pubkey },
 }
 
 fn keys_of(msg: &yellowstone_grpc_proto::prelude::Message, lw: &[Vec<u8>], lr: &[Vec<u8>]) -> Vec<Pubkey> {
@@ -196,6 +198,8 @@ pub async fn run_processed(endpoint: String, token: String, mut funders_rx: toki
                                 if keys.get(ix.program_id_index as usize) != Some(&PUMP) || ix.data.len() < 16 || ix.data[..8] != EVENT_IX_TAG { continue; }
                                 if let Some((mint, sol, tok, is_buy, user, vsol, vtok)) = parse_trade_event(&ix.data[8..]) {
                                     let _ = tx.send(Ev::Trade { slot, idx: ti.index, sig, signer, ok, mint, sol, tok, is_buy, user, vsol, vtok });
+                                } else if let Some(mint) = parse_create_event_mint(&ix.data[8..]) {
+                                    let _ = tx.send(Ev::CreateExec { slot, idx: ti.index, mint });
                                 }
                             }
                         }

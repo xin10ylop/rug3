@@ -8,6 +8,8 @@ usage: python3 live_eval.py JOURNAL.jsonl [WALLET_PUBKEY]   (wallet defaults to 
      (create slot, no rival), late (after the create slot, no rival) -> PnL by outcome, live contested win rate
   3. sim-vs-live: simulator re-run at OUR EXACT landing position (slot + in-block index) for each fill
   4. control: launches deliberately skipped (control_skip) simulated as race winner (b0start) and loser (b0end)
+Trade data for 2-4 comes from the bot's own stream log ("obs" events) when present, else from RPC history
+(which can lag by an hour); PnL from the wallet's on-chain history, else from the journal's fills minus fees.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from rpc import Rpc
 from sim import load_launch, simulate
 
 TX_COST = 495_000 + 195_000  # configured buy + sell priority fee, tip and base fee (lamports)
+BUY_FEE, SELL_FEE, FAILED_BUY = 495_000, 195_000, 485_000
 TP, HOLD = 0.3, 142          # exit as configured: +30% net or 30 s (~142 slots)
 RACE_WIN = 0.42              # measured by the gated probe: ahead of all slot-0 rivals on 42% of contested launches
 
@@ -39,6 +42,28 @@ async def mint_txs(rpc: Rpc, mint: str, s0: int, slots: int):
         seq.append(dict(slot=ti.slot, idx=ti.tx_index or 0, ok=ti.ok, signer=ti.signer, sig=ti.sig,
                         create=any(n == "create" for n, _ in ti.events), trades=trades))
     return seq
+
+
+def seq_from_obs(obs, cre):
+    """Pseudo-transactions (one per slot/index) from the bot's trade log of a launch and its executed-create position."""
+    g = collections.defaultdict(list)
+    for o in obs:
+        g[(o["slot"], o["idx"])].append({"is_buy": o["buy"], "user": o["user"], "sol_amount": o["sol"], "token_amount": o["tok"],
+                                         "virtual_sol_reserves": o["vsol"], "virtual_token_reserves": o["vtok"], "mint": o["mint"]})
+    if cre and cre not in g:
+        g[cre] = []
+    return [dict(slot=k[0], idx=k[1], ok=True, signer=tr[0]["user"] if tr else "", sig="", create=k == cre, trades=tr)
+            for k, tr in sorted(g.items())]
+
+
+async def launch_seq(rpc, m, es, create_slot, src):
+    obs = [e for e in es if e["ev"] == "obs"]
+    cre = next(((e["slot"], e["idx"]) for e in es if e["ev"] == "obs_create"), None)
+    if cre:
+        src["journal"] += 1
+        return seq_from_obs(obs, cre)
+    src["rpc"] += 1
+    return await mint_txs(rpc, m, create_slot, 900)
 
 
 def launch_of(seq, mint, deployer, exclude_user=None):
@@ -83,6 +108,16 @@ async def main():
     controls = {m: es for m, es in by_mint.items() if any(x["ev"] == "control_skip" for x in es)}
     skips = collections.Counter(e["why"] for e in ev if e.get("ev") == "skip")
     print(f"journal: {len(ev)} events; buys sent for {len(traded)} mints; control skips {len(controls)}; skips {dict(skips)}")
+    obs = collections.defaultdict(list)
+    for e in ev:
+        if e.get("ev") == "obs":
+            obs[e["mint"]].append(e)
+    jumps = 0  # each trade's reported reserves must follow from the previous trade's: a jump means a missing trade
+    for xs in obs.values():
+        xs.sort(key=lambda e: (e["slot"], e["idx"]))
+        jumps += sum(abs((a["vsol"] + b["sol"] if b["buy"] else a["vsol"] - b["sol"]) - b["vsol"]) > 2 for a, b in zip(xs, xs[1:]))
+    if obs:
+        print(f"trade log: {len(obs)} launches, {sum(map(len, obs.values()))} trades, {jumps} reserve jumps (0 = complete)")
 
     async with Rpc(rps=30, concurrency=8) as rpc:
         hist = []
@@ -90,6 +125,7 @@ async def main():
             hist.append(t)
         delta_by_mint, fails = collections.defaultdict(int), collections.Counter()
         first_ok = {}  # mint -> (slot, index) of our first successful tx for it = our fill (ground truth, not journal)
+        okn = collections.Counter()  # successful txs per mint in the (possibly lagging) history
         for t in hist:
             keys = t["transaction"]["message"]["accountKeys"]
             la = t["meta"].get("loadedAddresses") or {}
@@ -101,24 +137,34 @@ async def main():
             for m in (m for m in traded if m in allk):
                 delta_by_mint[m] += d
                 fails[m] += bool(t["meta"].get("err"))
+                okn[m] += not t["meta"].get("err")
                 if not t["meta"].get("err") and m not in first_ok:
                     first_ok[m] = (t["slot"], t.get("transactionIndex") or 0)
 
         res = []
+        src = collections.Counter()
 
         async def one(m, es):
             sent = next(x for x in es if x["ev"] == "buy_sent")
-            fill = first_ok.get(m)
+            jf = next((x for x in es if x["ev"] == "buy_fill"), None)
+            fill = (jf["slot"], jf["idx"]) if jf else first_ok.get(m)
             sell = next((x for x in es if x["ev"] == "sell_fill"), None)
             d = sent["d"]
+            if m in delta_by_mint and (okn[m] >= 2 or not sell):  # history has both legs (or there was no sell)
+                pnl, psrc = delta_by_mint[m] / 1e9, "chain"
+            elif fill and sell:
+                n_sells = sum(1 for x in es if x["ev"] == "sell_sent")
+                pnl, psrc = (sell["pnl"] - BUY_FEE - SELL_FEE * max(n_sells, 1)) / 1e9, "journal"
+            else:
+                pnl, psrc = (-FAILED_BUY if not fill else -BUY_FEE) / 1e9, "journal"
             r = {"mint": m, "rule": d["rule"], "fp": d.get("fp"), "leader_km": d.get("leader_km"),
                  "into_slot_ms": d.get("into_slot_ms"), "create_slot": d["create_slot"], "spend": sent["spend"] / 1e9,
-                 "pnl_chain": delta_by_mint.get(m, 0) / 1e9, "failed_txs": fails.get(m, 0),
+                 "pnl_chain": pnl, "pnl_src": psrc, "failed_txs": fails.get(m, 0),
                  "filled": fill is not None, "closed": sell is not None, "race": "no_fill"}
             res.append(r)
             if not fill:
                 return
-            seq = await mint_txs(rpc, m, d["create_slot"], 900)
+            seq = await launch_seq(rpc, m, es, d["create_slot"], src)
             L, cr = launch_of(seq, m, d["deployer"], exclude_user=wallet)
             if not L:
                 return
@@ -134,7 +180,7 @@ async def main():
 
         async def ctl(m, es):
             c = next(x for x in es if x["ev"] == "control_skip")["d"]
-            seq = await mint_txs(rpc, m, c["create_slot"], 900)
+            seq = await launch_seq(rpc, m, es, c["create_slot"], src)
             L, cr = launch_of(seq, m, c["deployer"])
             if L:
                 size = float(np.median([r["spend"] for r in res])) if res else 0.03
@@ -147,11 +193,12 @@ async def main():
         await asyncio.gather(*(ctl(m, es) for m, es in controls.items()))
 
     filled = [r for r in res if r["filled"]]
+    print(f"trade data: {dict(src)} launches | PnL source: {dict(collections.Counter(r['pnl_src'] for r in res))}")
     print(f"\nbuys sent {len(res)}, filled {len(filled)} ({len(filled) / max(len(res), 1):.0%}), "
           f"closed {sum(r['closed'] for r in res)}")
     if not res:
         return
-    print("ON-CHAIN PnL (SOL; every sent buy, incl. failed/missed costs):")
+    print("PnL (SOL; every sent buy, incl. fees and failed/missed costs):")
     print(f"  all            {stat([r['pnl_chain'] for r in res])}")
     for k in ("won", "lost", "uncontested", "late", "no_fill"):
         print(f"  {k:14s} {stat([r['pnl_chain'] for r in res if r['race'] == k])}")

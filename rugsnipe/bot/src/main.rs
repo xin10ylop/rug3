@@ -102,6 +102,7 @@ struct State {
     creates_seen: u64,
     probes_sent: u64,
     dep_seen: HashMap<Pubkey, VecDeque<Instant>>, // SOL-paired creates per deployer, trailing 24 h
+    observe: HashMap<Pubkey, u64>, // bought or control-skipped mints -> log their trades until this slot
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -302,6 +303,7 @@ impl Bot {
             if rand::thread_rng().gen::<f64>() < self.cfg.control_skip_prob {
                 drop(s);
                 self.j.log(json!({"ev": "control_skip", "d": base}));
+                self.s.lock().observe.insert(info.mint, slot + 160);
                 return;
             }
             s.buys_hour.push(Instant::now());
@@ -326,6 +328,7 @@ impl Bot {
         }
         if self.live() {
             let res = self.senders.send_all(&wire).await;
+            self.s.lock().observe.insert(info.mint, slot + 160);
             self.j.log(json!({"ev": "buy_sent", "d": base, "sig": bs58::encode(tsig).into_string(), "spend": spend,
                 "min_out": min_out, "build_us": build_us, "send": res, "since_recv_ms": recv.elapsed().as_secs_f64()*1e3,
                 "wall_ms": now_ms()}));
@@ -581,7 +584,7 @@ async fn main() -> anyhow::Result<()> {
     let bot = Arc::new(Bot { balance: std::sync::atomic::AtomicU64::new(u64::MAX), cfg: cfg.clone(), kp, me, uva, st, senders, bh, j, tips, sell_tips, rules: parking_lot::RwLock::new(rules), leaders,
         s: Mutex::new(State { armed: HashMap::new(), pending: HashMap::new(), positions: HashMap::new(), curves: HashMap::new(),
             slot: 0, day_pnl: 0, consec_losses: 0, buys_hour: vec![], disabled: false, creates_seen: 0, probes_sent: 0,
-            dep_seen: HashMap::new() }), fp_rules: parking_lot::RwLock::new(fp_rules) });
+            dep_seen: HashMap::new(), observe: HashMap::new() }), fp_rules: parking_lot::RwLock::new(fp_rules) });
 
     if bot.live() || bot.cfg.mode == "probe" {
         // refuse to trade live without a blockhash or with an empty wallet
@@ -699,7 +702,7 @@ async fn main() -> anyhow::Result<()> {
     let mut last_stats = Instant::now();
     while let Some(ev) = rx.recv().await {
         *cnt.entry(match &ev { Ev::Create { .. } => "create", Ev::Trade { .. } => "trade", Ev::Funding { .. } => "funding",
-            Ev::Failed { .. } => "failed", Ev::Slot { .. } => "slot" }).or_insert(0) += 1;
+            Ev::Failed { .. } => "failed", Ev::Slot { .. } => "slot", Ev::CreateExec { .. } => "create_exec" }).or_insert(0) += 1;
         if last_stats.elapsed() > Duration::from_secs(60) {
             let (armed, open, pending, slot) = { let s = bot.s.lock(); (s.armed.len(), s.positions.len(), s.pending.len(), s.slot) };
             let probes = bot.s.lock().probes_sent;
@@ -714,6 +717,12 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move { b.on_create(slot, sig, info, recv, into_slot_ms, fp).await });
             }
             Ev::Trade { slot, idx, sig, signer, ok: _, mint, sol, tok, is_buy, user, vsol, vtok } => {
+                // trade log of observed launches (bought and control-skipped): lets live_eval simulate both halves
+                // of the presence test from our own stream instead of an RPC history index
+                if bot.s.lock().observe.get(&mint).is_some_and(|u| slot <= *u) {
+                    bot.j.log(json!({"ev": "obs", "mint": mint.to_string(), "slot": slot, "idx": idx, "user": user.to_string(),
+                        "buy": is_buy, "sol": sol, "tok": tok, "vsol": vsol, "vtok": vtok}));
+                }
                 if let Some(m) = bot.on_trade(slot, idx, sig, signer, mint, sol, tok, is_buy, user, vsol, vtok) {
                     let b = bot.clone();
                     tokio::spawn(async move { b.sell(m, false).await });
@@ -748,7 +757,16 @@ async fn main() -> anyhow::Result<()> {
             Ev::Failed { slot, sig, signer: _ } => {
                 bot.j.log(json!({"ev": "our_tx_failed", "slot": slot, "sig": bs58::encode(sig).into_string()}));
             }
-            Ev::Slot { slot, .. } => { let mut s = bot.s.lock(); if slot > s.slot { s.slot = slot; } }
+            Ev::Slot { slot, .. } => {
+                let mut s = bot.s.lock();
+                if slot > s.slot { s.slot = slot; }
+                s.observe.retain(|_, u| *u >= slot);
+            }
+            Ev::CreateExec { slot, idx, mint } => {
+                if bot.s.lock().observe.contains_key(&mint) {
+                    bot.j.log(json!({"ev": "obs_create", "mint": mint.to_string(), "slot": slot, "idx": idx}));
+                }
+            }
         }
     }
     Ok(())

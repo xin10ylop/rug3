@@ -31,6 +31,7 @@ pub const DISC_CREATE: [u8; 8] = [0x18, 0x1e, 0xc8, 0x28, 0x05, 0x1c, 0x07, 0x77
 pub const DISC_CREATE_V2: [u8; 8] = [0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4];
 pub const EVENT_IX_TAG: [u8; 8] = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
 pub const EV_TRADE: [u8; 8] = [0xbd, 0xdb, 0x7f, 0xd3, 0x4e, 0xe6, 0x61, 0xee];
+pub const EV_CREATE: [u8; 8] = [0x1b, 0x72, 0xa9, 0x4d, 0xde, 0xeb, 0x63, 0x76];
 
 pub const VSOL0: u128 = 30_000_000_000;
 pub const VTOK0: u128 = 1_073_000_000_000_000;
@@ -215,6 +216,14 @@ fn read_str(d: &[u8], o: &mut usize) -> Option<()> {
     let n = u32::from_le_bytes(d[*o..*o + 4].try_into().ok()?) as usize;
     *o += 4 + n;
     if *o > d.len() { None } else { Some(()) }
+}
+
+/// Mint of an executed CreateEvent payload (after the 8-byte EVENT_IX_TAG): name, symbol, uri, then mint.
+pub fn parse_create_event_mint(d: &[u8]) -> Option<Pubkey> {
+    if d.len() < 8 || d[..8] != EV_CREATE { return None; }
+    let mut o = 8;
+    for _ in 0..3 { read_str(d, &mut o)?; }
+    Pubkey::try_from(d.get(o..o + 32)?).ok()
 }
 
 /// Parse a pump create / create_v2 instruction given resolved account keys of the instruction.
